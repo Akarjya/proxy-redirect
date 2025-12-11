@@ -43,6 +43,21 @@
     } catch(e) {}
   }
   
+  // Fallback: try to get original URL from referrer if current page has invalid proxy URL
+  let REFERRER_ORIGINAL_URL_OBJ = null;
+  if (!ORIGINAL_URL_OBJ && document.referrer) {
+    try {
+      const refUrl = new URL(document.referrer);
+      if (refUrl.pathname.startsWith('/p/')) {
+        const encoded = refUrl.pathname.substring(3);
+        let base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+        while (base64.length % 4) base64 += '=';
+        const decodedRef = decodeURIComponent(escape(atob(base64)));
+        REFERRER_ORIGINAL_URL_OBJ = new URL(decodedRef);
+      }
+    } catch(e) {}
+  }
+  
   // Spoof document.URL
   if (ORIGINAL_URL) {
     try {
@@ -507,6 +522,23 @@
   // This is CRITICAL for ad click-through to work via proxy
   // ═══════════════════════════════════════════════════════════════════════
   
+  // Helper to check if a proxy URL is valid (base64 encoded)
+  function isValidProxyUrl(url) {
+    try {
+      const urlObj = new URL(url);
+      const path = urlObj.pathname;
+      if (!path.startsWith('/p/')) return false;
+      const encoded = path.substring(3);
+      // Valid base64 encoded URLs are typically longer and use base64 chars
+      // Invalid ones like "index.html" are short and have dots/extensions
+      if (encoded.length < 10) return false;
+      if (encoded.includes('.') && !encoded.includes('_')) return false; // Has file extension, not base64
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+  
   // Intercept ALL external link clicks (not just ad URLs)
   document.addEventListener('click', function(e) {
     // Find the clicked anchor element
@@ -519,13 +551,33 @@
     const href = link.href;
     if (!href) return;
     
-    // Already proxied - let it pass
-    if (href.includes('/p/')) return;
+    // Check if it's a same-origin URL with /p/ prefix
+    try {
+      const urlObj = new URL(href);
+      if (urlObj.origin === window.location.origin && href.includes('/p/')) {
+        // Check if it's a VALID proxy URL (properly base64 encoded)
+        if (isValidProxyUrl(href)) {
+          return; // Valid proxy URL, let it pass
+        }
+        // Invalid proxy URL (like /p/index.html) - try to fix it
+        const badPath = urlObj.pathname.substring(3); // Remove /p/
+        const baseUrlObj = ORIGINAL_URL_OBJ || REFERRER_ORIGINAL_URL_OBJ;
+        if (baseUrlObj) {
+          // Resolve relative URL against original URL
+          const fixedUrl = new URL(badPath, baseUrlObj.href).href;
+          console.log('[Proxy] Fixing invalid proxy URL:', href, '→', fixedUrl);
+          e.preventDefault();
+          e.stopPropagation();
+          window.location.href = toProxyUrl(fixedUrl);
+          return false;
+        }
+      }
+    } catch(err) {}
     
     // Skip non-http URLs
     if (!href.startsWith('http://') && !href.startsWith('https://')) return;
     
-    // Skip same-origin URLs
+    // Skip same-origin URLs (that are not invalid proxy URLs)
     try {
       const urlObj = new URL(href);
       if (urlObj.origin === window.location.origin) return;
@@ -573,7 +625,17 @@
     
     const href = link.href;
     if (!href) return;
-    if (href.includes('/p/')) return;
+    
+    // Check for invalid proxy URLs
+    try {
+      const urlObj = new URL(href);
+      if (urlObj.origin === window.location.origin && href.includes('/p/')) {
+        if (isValidProxyUrl(href)) return;
+        // Don't store data-proxy-url for invalid URLs, let click handler fix it
+        return;
+      }
+    } catch(err) {}
+    
     if (!href.startsWith('http://') && !href.startsWith('https://')) return;
     
     try {
