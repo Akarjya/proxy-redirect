@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Loading...</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+    }
+    
+    .container {
+      text-align: center;
+      padding: 2rem;
+    }
+    
+    .loader {
+      width: 60px;
+      height: 60px;
+      border: 4px solid rgba(255, 255, 255, 0.1);
+      border-left-color: #e94560;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 1.5rem;
+    }
+    
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 500;
+      margin-bottom: 0.5rem;
+      color: #fff;
+    }
+    
+    .status {
+      font-size: 0.9rem;
+      color: rgba(255, 255, 255, 0.7);
+      margin-bottom: 1rem;
+    }
+    
+    .progress {
+      width: 200px;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 2px;
+      margin: 0 auto;
+      overflow: hidden;
+    }
+    
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #e94560, #ff6b6b);
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+    
+    .error {
+      color: #ff6b6b;
+      margin-top: 1rem;
+      font-size: 0.9rem;
+      display: none;
+    }
+    
+    .error.show {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="loader"></div>
+    <h1>Preparing Your Session</h1>
+    <p class="status" id="status">Initializing...</p>
+    <div class="progress">
+      <div class="progress-bar" id="progress"></div>
+    </div>
+    <p class="error" id="error"></p>
+  </div>
+
+  <script>
+    // Configuration
+    const TARGET_SITE = '__TARGET_SITE__'; // Will be replaced by server
+    
+    // DOM elements
+    const statusEl = document.getElementById('status');
+    const progressEl = document.getElementById('progress');
+    const errorEl = document.getElementById('error');
+    
+    // Update progress UI
+    function updateProgress(percent, message) {
+      progressEl.style.width = percent + '%';
+      statusEl.textContent = message;
+    }
+    
+    // Show error
+    function showError(message) {
+      errorEl.textContent = message;
+      errorEl.classList.add('show');
+    }
+    
+    // Base64 URL encode
+    function base64UrlEncode(str) {
+      const base64 = btoa(unescape(encodeURIComponent(str)));
+      return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+    
+    // Main initialization
+    async function initialize() {
+      try {
+        // Step 1: Check Service Worker support
+        updateProgress(10, 'Checking browser support...');
+        
+        if (!('serviceWorker' in navigator)) {
+          throw new Error('Service Workers not supported. Please use a modern browser.');
+        }
+        
+        await new Promise(r => setTimeout(r, 300));
+        
+        // Step 2: Register Service Worker
+        updateProgress(30, 'Installing service worker...');
+        
+        const registration = await navigator.serviceWorker.register('/sw.js', {
+          scope: '/'
+        });
+        
+        console.log('[Init] SW registered:', registration.scope);
+        
+        // Step 3: Wait for SW to be ready
+        updateProgress(50, 'Activating service worker...');
+        
+        await navigator.serviceWorker.ready;
+        console.log('[Init] SW ready');
+        
+        // Additional wait to ensure SW has claimed clients
+        await new Promise(r => setTimeout(r, 500));
+        
+        // Step 4: Create/get session
+        updateProgress(70, 'Creating secure session...');
+        
+        const sessionResponse = await fetch('/api/session', {
+          method: 'POST',
+          credentials: 'include'
+        });
+        
+        if (!sessionResponse.ok) {
+          throw new Error('Failed to create session');
+        }
+        
+        const sessionData = await sessionResponse.json();
+        console.log('[Init] Session created:', sessionData.sessionId?.substring(0, 8) + '...');
+        
+        // Step 5: Redirect to target site
+        updateProgress(90, 'Redirecting to content...');
+        
+        await new Promise(r => setTimeout(r, 500));
+        
+        // Encode target URL and redirect
+        const encodedTarget = base64UrlEncode(TARGET_SITE);
+        const proxyUrl = '/p/' + encodedTarget;
+        
+        updateProgress(100, 'Loading content...');
+        
+        // Small delay before redirect
+        await new Promise(r => setTimeout(r, 300));
+        
+        // Navigate to proxied target
+        window.location.href = proxyUrl;
+        
+      } catch (error) {
+        console.error('[Init] Error:', error);
+        showError(error.message || 'An error occurred. Please refresh and try again.');
+      }
+    }
+    
+    // Start initialization when page loads
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initialize);
+    } else {
+      initialize();
+    }
+  </script>
+</body>
+</html>
+
