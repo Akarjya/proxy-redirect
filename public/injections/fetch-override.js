@@ -11,6 +11,76 @@
 (function() {
   'use strict';
   
+  console.log('[Proxy] ===================================');
+  console.log('[Proxy] FETCH-OVERRIDE SCRIPT LOADING...');
+  console.log('[Proxy] ===================================');
+  
+  // ═══════════════════════════════════════════════════════════════════════
+  // CRITICAL: OVERRIDE document.createElement FOR IFRAMES
+  // This catches iframes created BEFORE any src is set
+  // ═══════════════════════════════════════════════════════════════════════
+  var originalCreateElement = document.createElement.bind(document);
+  document.createElement = function(tagName) {
+    var element = originalCreateElement(tagName);
+    
+    // If creating an iframe, immediately override its src property
+    if (tagName && tagName.toLowerCase() === 'iframe') {
+      console.log('[Proxy] 🎯 IFRAME ELEMENT CREATED - Installing src interceptor');
+      
+      // Immediately define src property before it's used
+      var _internalSrc = '';
+      Object.defineProperty(element, 'src', {
+        get: function() {
+          return _internalSrc;
+        },
+        set: function(value) {
+          console.log('[Proxy] 🚨 IFRAME.src SET to:', value?.substring(0, 80));
+          
+          // Check if it's an ad URL or external URL
+          if (value && typeof value === 'string') {
+            var needsProxy = false;
+            
+            // Check if it's a Google Ad URL
+            if (value.includes('googleads.g.doubleclick.net') || 
+                value.includes('pagead2.googlesyndication.com') ||
+                value.includes('googlesyndication.com')) {
+              console.log('[Proxy] 🎯 GOOGLE AD IFRAME DETECTED!');
+              needsProxy = true;
+            }
+            // Check if it's any external URL
+            else if (value.startsWith('http://') || value.startsWith('https://')) {
+              try {
+                var urlObj = new URL(value);
+                if (urlObj.origin !== window.location.origin) {
+                  console.log('[Proxy] 🌐 EXTERNAL IFRAME DETECTED!');
+                  needsProxy = true;
+                }
+              } catch(e) {}
+            }
+            
+            // Proxy the URL
+            if (needsProxy && !value.includes('/p/')) {
+              var base64 = btoa(unescape(encodeURIComponent(value)));
+              var encoded = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+              value = '/p/' + encoded;
+              console.log('[Proxy] ✅ PROXIED IFRAME URL:', value.substring(0, 80));
+            }
+          }
+          
+          _internalSrc = value;
+          // Set the actual attribute
+          this.setAttribute('src', value);
+        },
+        configurable: true,
+        enumerable: true
+      });
+    }
+    
+    return element;
+  };
+  
+  console.log('[Proxy] ✅ document.createElement OVERRIDDEN for iframes');
+  
   // ═══════════════════════════════════════════════════════════════════════
   // LOCATION SPOOFING FOR GOOGLE ADS
   // ═══════════════════════════════════════════════════════════════════════
