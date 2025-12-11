@@ -171,20 +171,22 @@ self.addEventListener('fetch', (event) => {
   const destination = request.destination;
   const mode = request.mode;
   
-  // Detailed logging for debugging
-  console.log(`[SW ${SW_VERSION}] Fetch:`, {
-    url: url.substring(0, 80),
+  // ENHANCED logging - log EVERYTHING for debugging
+  const requestInfo = {
+    url: url.substring(0, 100),
     mode: mode,
     dest: destination,
-    type: request.headers.get('accept')?.substring(0, 30) || 'unknown'
-  });
+    type: request.headers.get('accept')?.substring(0, 40) || 'unknown',
+    referrer: request.referrer?.substring(0, 60) || 'none'
+  };
+  console.log(`[SW ${SW_VERSION}] 📥 FETCH:`, requestInfo);
   
   // ═══════════════════════════════════════════════════════════
   // STEP 1: Handle already-proxied requests (/p/*)
   // These are URLs that have already been converted to proxy format
   // ═══════════════════════════════════════════════════════════
   if (isProxyRequest(url)) {
-    console.log(`[SW ${SW_VERSION}] Handling proxy request`);
+    console.log(`[SW ${SW_VERSION}] ✓ Handling proxy request`);
     event.respondWith(handleProxyRequest(event));
     return;
   }
@@ -194,7 +196,7 @@ self.addEventListener('fetch', (event) => {
   // These are our own server resources, not external
   // ═══════════════════════════════════════════════════════════
   if (isStaticAsset(url)) {
-    console.log(`[SW ${SW_VERSION}] Static asset, passing through`);
+    console.log(`[SW ${SW_VERSION}] ✓ Static asset, passing through:`, url.substring(0, 60));
     return; // Default browser handling
   }
   
@@ -247,7 +249,7 @@ self.addEventListener('fetch', (event) => {
     // - Fonts
     // - XHR/Fetch requests
     // - Web sockets (where possible)
-    console.log(`[SW ${SW_VERSION}] 📡 PROXY EXTERNAL:`, destination || 'unknown', url.substring(0, 80));
+    console.log(`[SW ${SW_VERSION}] 📡 PROXY EXTERNAL (dest=${destination}, mode=${mode}):`, url.substring(0, 80));
     event.respondWith(handleExternalResource(event, url));
     return;
   }
@@ -256,7 +258,7 @@ self.addEventListener('fetch', (event) => {
   // STEP 4: Same-origin requests pass through normally
   // These are requests to our own domain that aren't /p/* or /api/*
   // ═══════════════════════════════════════════════════════════
-  console.log(`[SW ${SW_VERSION}] Same-origin, passing through`);
+  console.log(`[SW ${SW_VERSION}] ✓ Same-origin, passing through:`, url.substring(0, 80));
 });
 
 /**
