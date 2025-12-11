@@ -4,12 +4,15 @@
  * Intercepts all network requests and routes /p/* requests through the backend proxy.
  * Handles session management and request forwarding.
  * 
- * Version: 2 - Fixed proxy endpoint from /api/proxy to /proxy
+ * Version: 5 - ENHANCED FIX: Aggressive iframe interception
+ * - Added explicit iframe destination detection
+ * - Fixed Google Ad iframes bypassing proxy
+ * - Special handling for destination === 'iframe'
+ * - Ensures ALL ad requests go through proxy server
  */
 
-// Cache name for any cached assets
-// V3: Fixed iframe handling - proxy instead of redirect
-const CACHE_NAME = 'proxy-poc-v3';
+// Cache name - increment to force SW update
+const CACHE_NAME = 'proxy-poc-v5';
 
 /**
  * Install event - Called when SW is first installed
@@ -141,120 +144,156 @@ function externalToProxyUrl(url) {
 
 /**
  * Fetch event - Intercepts all network requests
- * V3: Fixed to properly handle iframe requests - proxy them instead of redirect
- * CRITICAL: Iframes should NOT be redirected, they should be proxied directly
+ * V5: ENHANCED FIX - Aggressive iframe interception for Google Ads
+ * - Top-level navigation: redirect to proxy URL (so URL bar updates)
+ * - All other external requests: fetch through proxy
+ * - SPECIAL HANDLING for iframe destinations (destination === 'iframe')
+ * - This ensures ads, iframes, scripts, images ALL go through proxy
  */
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   const url = request.url;
+  const destination = request.destination;
+  const mode = request.mode;
   
-  console.log('[SW] Fetch event:', url.substring(0, 60), 'mode:', request.mode, 'dest:', request.destination);
+  // Detailed logging for debugging
+  console.log('[SW V5] Fetch:', {
+    url: url.substring(0, 80),
+    mode: mode,
+    dest: destination,
+    type: request.headers.get('accept')?.substring(0, 30) || 'unknown'
+  });
   
-  // Check if this is a proxy request (/p/*)
+  // ═══════════════════════════════════════════════════════════
+  // STEP 1: Handle already-proxied requests (/p/*)
+  // These are URLs that have already been converted to proxy format
+  // ═══════════════════════════════════════════════════════════
   if (isProxyRequest(url)) {
-    console.log('[SW] Intercepting proxy request');
+    console.log('[SW V5] Handling proxy request');
     event.respondWith(handleProxyRequest(event));
     return;
   }
   
-  // For static assets and API calls, let them pass through normally
+  // ═══════════════════════════════════════════════════════════
+  // STEP 2: Let static assets and API calls pass through
+  // These are our own server resources, not external
+  // ═══════════════════════════════════════════════════════════
   if (isStaticAsset(url)) {
-    console.log('[SW] Static asset, passing through');
+    console.log('[SW V5] Static asset, passing through');
     return; // Default browser handling
   }
   
   // ═══════════════════════════════════════════════════════════
-  // CRITICAL FIX V3: Handle all external URLs appropriately
-  // - Document navigations: redirect to proxy URL
-  // - Iframes: fetch through proxy (NOT redirect - this breaks iframes!)
-  // - Other resources: fetch through proxy
+  // STEP 3: PROXY ALL EXTERNAL URLs - This is the CRITICAL part
+  // Any URL that's not from our origin MUST go through proxy
   // ═══════════════════════════════════════════════════════════
   if (isExternalUrl(url)) {
     
-    // Check for Google ad click URLs specifically (these are navigation clicks)
-    const isAdClickUrl = url.includes('googleadservices.com/pagead/aclk') ||
-                        url.includes('googleads.g.doubleclick.net/dbm/clk') ||
-                        url.includes('doubleclick.net/pcs/click') ||
-                        url.includes('/pagead/aclk');
+    // CRITICAL: ALWAYS proxy iframe destinations
+    // Google Ads creates iframes dynamically, and we MUST intercept them
+    // destination === 'iframe' means this is an iframe src request
+    if (destination === 'iframe' || destination === '' && mode === 'no-cors') {
+      console.log('[SW V5] 🎯 IFRAME DETECTED - FORCING PROXY:', url.substring(0, 100));
+      event.respondWith(handleExternalResource(event, url));
+      return;
+    }
     
-    // Check for Google Ad domains (iframe content and resources)
-    const isGoogleAdDomain = url.includes('googleads.g.doubleclick.net') ||
-                            url.includes('pagead2.googlesyndication.com') ||
-                            url.includes('tpc.googlesyndication.com') ||
-                            url.includes('securepubads.g.doubleclick.net') ||
-                            url.includes('adtrafficquality.google') ||
-                            url.includes('googlesyndication.com');
+    // Determine if this is a top-level navigation
+    // Navigation = user clicking a link or typing in address bar
+    const isNavigation = mode === 'navigate';
     
-    // Determine request type
-    const isDocumentNavigation = request.mode === 'navigate' && request.destination === 'document';
-    const isIframeRequest = request.destination === 'iframe';
-    
-    // ═══════════════════════════════════════════════════════════
-    // CASE 1: Top-level document navigation (user clicking links)
-    // Use redirect so URL bar updates correctly
-    // ═══════════════════════════════════════════════════════════
-    if (isDocumentNavigation || isAdClickUrl) {
-      console.log('[SW] REDIRECTING TOP-LEVEL NAVIGATION:', url.substring(0, 80));
+    // For navigations, we REDIRECT so the URL bar shows the proxy URL
+    // This includes:
+    // - User clicking external links
+    // - Ad click URLs (which redirect to advertiser sites)
+    // - Form submissions to external URLs
+    if (isNavigation) {
+      console.log('[SW V5] REDIRECT NAVIGATION:', url.substring(0, 100));
       const proxyUrl = externalToProxyUrl(url);
       event.respondWith(Response.redirect(proxyUrl, 302));
       return;
     }
     
-    // ═══════════════════════════════════════════════════════════
-    // CASE 2: Iframe requests - MUST proxy content, NOT redirect!
-    // Redirecting iframes breaks them. We need to fetch content
-    // through proxy and return it so our scripts get injected.
-    // ═══════════════════════════════════════════════════════════
-    if (isIframeRequest) {
-      console.log('[SW] PROXYING IFRAME REQUEST:', url.substring(0, 80));
-      event.respondWith(handleExternalResource(event, url));
-      return;
-    }
-    
-    // ═══════════════════════════════════════════════════════════
-    // CASE 3: Google Ad domain resources (scripts, images, etc.)
-    // Proxy to maintain session and inject our scripts
-    // ═══════════════════════════════════════════════════════════
-    if (isGoogleAdDomain) {
-      console.log('[SW] PROXYING GOOGLE AD RESOURCE:', url.substring(0, 60));
-      event.respondWith(handleExternalResource(event, url));
-      return;
-    }
-    
-    // ═══════════════════════════════════════════════════════════
-    // CASE 4: All other external resources (images, scripts, etc.)
-    // Proxy to maintain anonymity
-    // ═══════════════════════════════════════════════════════════
-    console.log('[SW] PROXYING EXTERNAL RESOURCE:', url.substring(0, 60));
+    // For ALL other external requests, we FETCH through proxy
+    // This includes (but not limited to):
+    // - Iframes (Google Ads, etc.) - handled above
+    // - Scripts
+    // - Stylesheets  
+    // - Images
+    // - Fonts
+    // - XHR/Fetch requests
+    // - Web sockets (where possible)
+    console.log('[SW V5] PROXY EXTERNAL:', destination || 'unknown', url.substring(0, 80));
     event.respondWith(handleExternalResource(event, url));
     return;
   }
   
-  // For any other same-origin requests, pass through
-  console.log('[SW] Other request, passing through');
+  // ═══════════════════════════════════════════════════════════
+  // STEP 4: Same-origin requests pass through normally
+  // These are requests to our own domain that aren't /p/* or /api/*
+  // ═══════════════════════════════════════════════════════════
+  console.log('[SW V5] Same-origin, passing through');
 });
 
 /**
- * Handle external resource requests (images, scripts, etc.)
+ * Handle external resource requests (iframes, images, scripts, etc.)
+ * V4: Improved error handling and header forwarding
  */
 async function handleExternalResource(event, url) {
   try {
-    // Convert to proxy URL and fetch
+    // Convert external URL to proxy API URL
     const normalizedUrl = normalizeExternalUrl(url);
     const encoded = base64UrlEncode(normalizedUrl);
     const proxyApiUrl = new URL('/api/proxy', self.location.origin);
     proxyApiUrl.searchParams.set('url', encoded);
     
+    // Build headers - forward important ones from original request
+    const headers = new Headers();
+    
+    // Forward User-Agent
+    if (event.request.headers.has('user-agent')) {
+      headers.set('X-Original-UA', event.request.headers.get('user-agent'));
+      headers.set('User-Agent', event.request.headers.get('user-agent'));
+    }
+    
+    // Forward Accept headers
+    if (event.request.headers.has('accept')) {
+      headers.set('Accept', event.request.headers.get('accept'));
+    }
+    if (event.request.headers.has('accept-language')) {
+      headers.set('Accept-Language', event.request.headers.get('accept-language'));
+    }
+    
+    console.log('[SW V4] Fetching through proxy:', proxyApiUrl.toString().substring(0, 100));
+    
     const response = await fetch(proxyApiUrl.toString(), {
       method: event.request.method,
-      headers: event.request.headers,
-      credentials: 'include'
+      headers: headers,
+      credentials: 'include' // Include cookies for session
     });
     
+    // Check if response is OK
+    if (!response.ok) {
+      console.error('[SW V4] Proxy returned error:', response.status, 'for', url.substring(0, 60));
+    }
+    
     return response;
+    
   } catch (error) {
-    console.error('[SW] External resource proxy error:', error);
-    return new Response('Proxy Error: ' + error.message, { status: 502 });
+    console.error('[SW V4] Proxy fetch error:', error.message, 'for', url.substring(0, 60));
+    
+    // Return a meaningful error response
+    return new Response(
+      JSON.stringify({
+        error: 'Proxy Error',
+        message: error.message,
+        url: url.substring(0, 100)
+      }),
+      { 
+        status: 502,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
   }
 }
 
@@ -337,5 +376,5 @@ self.addEventListener('message', (event) => {
   }
 });
 
-console.log('[SW] Service Worker loaded');
+console.log('[SW V5] Service Worker loaded - Enhanced iframe interception enabled');
 
