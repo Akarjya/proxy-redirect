@@ -293,24 +293,120 @@
   }
   
   // ═══════════════════════════════════════════════════════════════════════
-  // AD CLICK INTERCEPTION
+  // GOOGLE ADS URL REWRITING
   // ═══════════════════════════════════════════════════════════════════════
   
-  const adClickDomains = [
-    'googleadservices.com',
+  const adDomains = [
     'googleads.g.doubleclick.net',
     'pagead2.googlesyndication.com',
-    'www.googleadservices.com'
+    'www.googleadservices.com',
+    'googleadservices.com'
   ];
   
-  function isAdClickUrl(url) {
+  function isAdUrl(url) {
     try {
       const hostname = new URL(url).hostname;
-      return adClickDomains.some(d => hostname.includes(d));
+      return adDomains.some(d => hostname.includes(d));
     } catch {
       return false;
     }
   }
+  
+  /**
+   * Rewrite Google Ad URL to use original page URL
+   * Changes the 'url' parameter from proxy URL to original target URL
+   */
+  function rewriteAdUrl(adUrl) {
+    if (!ORIGINAL_URL || !isAdUrl(adUrl)) return adUrl;
+    
+    try {
+      const urlObj = new URL(adUrl);
+      const urlParam = urlObj.searchParams.get('url');
+      
+      // If the url param contains our proxy URL, replace with original
+      if (urlParam && urlParam.includes('/p/')) {
+        urlObj.searchParams.set('url', ORIGINAL_URL);
+        return urlObj.toString();
+      }
+      
+      // If url param is our proxy origin, replace with original
+      if (urlParam && urlParam.includes(window.location.origin)) {
+        urlObj.searchParams.set('url', ORIGINAL_URL);
+        return urlObj.toString();
+      }
+    } catch(e) {}
+    
+    return adUrl;
+  }
+  
+  // ═══════════════════════════════════════════════════════════════════════
+  // IFRAME AD URL INTERCEPTION
+  // ═══════════════════════════════════════════════════════════════════════
+  
+  // Override iframe src setter to rewrite Google Ad URLs
+  try {
+    const iframeDescriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
+    if (iframeDescriptor && iframeDescriptor.set) {
+      const originalIframeSrcSetter = iframeDescriptor.set;
+      
+      Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
+        get: iframeDescriptor.get,
+        set: function(value) {
+          // Rewrite Google Ad URLs to use original page URL
+          if (value && isAdUrl(value)) {
+            value = rewriteAdUrl(value);
+          } else if (shouldProxy(value)) {
+            value = toProxyUrl(value);
+          }
+          return originalIframeSrcSetter.call(this, value);
+        },
+        configurable: true,
+        enumerable: iframeDescriptor.enumerable
+      });
+    }
+  } catch(e) {}
+  
+  // Also intercept setAttribute for iframes
+  const originalSetAttribute = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function(name, value) {
+    if (this.tagName === 'IFRAME' && name.toLowerCase() === 'src') {
+      if (value && isAdUrl(value)) {
+        value = rewriteAdUrl(value);
+      } else if (shouldProxy(value)) {
+        value = toProxyUrl(value);
+      }
+    }
+    return originalSetAttribute.call(this, name, value);
+  };
+  
+  // Watch for dynamically added iframes with MutationObserver
+  const observer = new MutationObserver(function(mutations) {
+    mutations.forEach(function(mutation) {
+      mutation.addedNodes.forEach(function(node) {
+        if (node.tagName === 'IFRAME' && node.src) {
+          if (isAdUrl(node.src)) {
+            const newSrc = rewriteAdUrl(node.src);
+            if (newSrc !== node.src) {
+              node.src = newSrc;
+            }
+          }
+        }
+      });
+    });
+  });
+  
+  // Start observing when DOM is ready
+  if (document.body) {
+    observer.observe(document.body, { childList: true, subtree: true });
+  } else {
+    document.addEventListener('DOMContentLoaded', function() {
+      observer.observe(document.body, { childList: true, subtree: true });
+    });
+  }
+  
+  // ═══════════════════════════════════════════════════════════════════════
+  // AD CLICK INTERCEPTION
+  // ═══════════════════════════════════════════════════════════════════════
   
   // Intercept clicks on ad links
   document.addEventListener('click', function(e) {
@@ -324,7 +420,7 @@
     if (href.includes('/p/')) return;
     
     // Check if ad click URL
-    if (isAdClickUrl(href)) {
+    if (isAdUrl(href)) {
       e.preventDefault();
       e.stopPropagation();
       window.location.href = toProxyUrl(href);
@@ -332,5 +428,8 @@
   }, true); // Capture phase
   
   console.log('[Proxy] Runtime overrides active');
+  if (ORIGINAL_URL) {
+    console.log('[Proxy] Original URL:', ORIGINAL_URL);
+  }
 })();
 
