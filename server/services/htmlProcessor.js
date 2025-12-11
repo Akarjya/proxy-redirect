@@ -218,20 +218,74 @@ function getWebRtcBlockScript() {
 
 /**
  * Get Fetch/XHR override script content
+ * @param {string} originalUrl - The original target URL for spoofing
  * @returns {string}
  */
-function getFetchOverrideScript() {
+function getFetchOverrideScript(originalUrl) {
   return `
 (function() {
   'use strict';
   
-  // Base64 URL encode function
+  // ═══════════════════════════════════════════════════════════
+  // ORIGINAL URL FOR LOCATION SPOOFING
+  // ═══════════════════════════════════════════════════════════
+  var ORIGINAL_URL = ${originalUrl ? `'${originalUrl}'` : 'null'};
+  var ORIGINAL_URL_OBJ = null;
+  
+  if (ORIGINAL_URL) {
+    try { ORIGINAL_URL_OBJ = new URL(ORIGINAL_URL); } catch(e) {}
+  }
+  
+  // Spoof document.URL for Google Ads
+  if (ORIGINAL_URL) {
+    try {
+      Object.defineProperty(document, 'URL', {
+        get: function() { return ORIGINAL_URL; },
+        configurable: true
+      });
+    } catch(e) {}
+    
+    try {
+      Object.defineProperty(document, 'documentURI', {
+        get: function() { return ORIGINAL_URL; },
+        configurable: true
+      });
+    } catch(e) {}
+    
+    try {
+      Object.defineProperty(document, 'baseURI', {
+        get: function() { return ORIGINAL_URL; },
+        configurable: true
+      });
+    } catch(e) {}
+    
+    if (ORIGINAL_URL_OBJ) {
+      try {
+        Object.defineProperty(document, 'domain', {
+          get: function() { return ORIGINAL_URL_OBJ.hostname; },
+          set: function() {},
+          configurable: true
+        });
+      } catch(e) {}
+    }
+    
+    try {
+      Object.defineProperty(document, 'referrer', {
+        get: function() { return ORIGINAL_URL_OBJ ? ORIGINAL_URL_OBJ.origin + '/' : ''; },
+        configurable: true
+      });
+    } catch(e) {}
+  }
+  
+  // ═══════════════════════════════════════════════════════════
+  // UTILITY FUNCTIONS
+  // ═══════════════════════════════════════════════════════════
+  
   function base64UrlEncode(str) {
-    const base64 = btoa(unescape(encodeURIComponent(str)));
+    var base64 = btoa(unescape(encodeURIComponent(str)));
     return base64.replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
   }
   
-  // Check if URL should be proxied
   function shouldProxy(url) {
     if (!url) return false;
     if (typeof url !== 'string') {
@@ -239,132 +293,155 @@ function getFetchOverrideScript() {
       else if (url instanceof Request) url = url.url;
       else return false;
     }
-    
-    // Skip already proxied URLs
     if (url.includes('/p/')) return false;
-    
-    // Skip data/blob URLs
     if (url.startsWith('data:')) return false;
     if (url.startsWith('blob:')) return false;
     if (url.startsWith('javascript:')) return false;
-    
-    // Skip relative URLs (handled by SW)
     if (!url.includes('://')) return false;
-    
-    // Skip same-origin requests (they go through SW anyway)
     try {
-      const urlObj = new URL(url);
+      var urlObj = new URL(url);
       if (urlObj.origin === window.location.origin) return false;
     } catch(e) {}
-    
     return true;
   }
   
-  // Convert URL to proxy URL
   function toProxyUrl(url) {
     return '/p/' + base64UrlEncode(url);
   }
   
   // ═══════════════════════════════════════════════════════════
+  // GOOGLE ADS URL REWRITING
+  // ═══════════════════════════════════════════════════════════
+  var adDomains = ['googleads.g.doubleclick.net', 'pagead2.googlesyndication.com', 'googleadservices.com'];
+  
+  function isAdUrl(url) {
+    try {
+      var hostname = new URL(url).hostname;
+      return adDomains.some(function(d) { return hostname.includes(d); });
+    } catch(e) { return false; }
+  }
+  
+  function rewriteAdUrl(adUrl) {
+    if (!ORIGINAL_URL || !isAdUrl(adUrl)) return adUrl;
+    try {
+      var urlObj = new URL(adUrl);
+      var urlParam = urlObj.searchParams.get('url');
+      if (urlParam && (urlParam.includes('/p/') || urlParam.includes(window.location.origin))) {
+        urlObj.searchParams.set('url', ORIGINAL_URL);
+        return urlObj.toString();
+      }
+    } catch(e) {}
+    return adUrl;
+  }
+  
+  // ═══════════════════════════════════════════════════════════
   // FETCH OVERRIDE
   // ═══════════════════════════════════════════════════════════
-  const originalFetch = window.fetch;
+  var originalFetch = window.fetch;
   window.fetch = function(input, init) {
-    let url;
-    if (typeof input === 'string') {
-      url = input;
-    } else if (input instanceof URL) {
-      url = input.href;
-    } else if (input instanceof Request) {
-      url = input.url;
-    }
+    var url;
+    if (typeof input === 'string') url = input;
+    else if (input instanceof URL) url = input.href;
+    else if (input instanceof Request) url = input.url;
     
     if (shouldProxy(url)) {
-      const proxyUrl = toProxyUrl(url);
-      if (input instanceof Request) {
-        input = new Request(proxyUrl, input);
-      } else {
-        input = proxyUrl;
-      }
+      var proxyUrl = toProxyUrl(url);
+      if (input instanceof Request) input = new Request(proxyUrl, input);
+      else input = proxyUrl;
     }
-    
     return originalFetch.call(this, input, init);
   };
   
   // ═══════════════════════════════════════════════════════════
   // XMLHttpRequest OVERRIDE
   // ═══════════════════════════════════════════════════════════
-  const originalXHROpen = XMLHttpRequest.prototype.open;
+  var originalXHROpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url) {
-    if (shouldProxy(url)) {
-      arguments[1] = toProxyUrl(url);
-    }
+    if (shouldProxy(url)) arguments[1] = toProxyUrl(url);
     return originalXHROpen.apply(this, arguments);
   };
   
   // ═══════════════════════════════════════════════════════════
-  // Element SRC/HREF property overrides
+  // IFRAME SRC OVERRIDE (for Google Ads)
+  // ═══════════════════════════════════════════════════════════
+  try {
+    var iframeDescriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
+    if (iframeDescriptor && iframeDescriptor.set) {
+      var originalIframeSrcSetter = iframeDescriptor.set;
+      Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
+        get: iframeDescriptor.get,
+        set: function(value) {
+          if (value && isAdUrl(value)) value = rewriteAdUrl(value);
+          else if (shouldProxy(value)) value = toProxyUrl(value);
+          return originalIframeSrcSetter.call(this, value);
+        },
+        configurable: true,
+        enumerable: iframeDescriptor.enumerable
+      });
+    }
+  } catch(e) {}
+  
+  // Override setAttribute for iframes
+  var originalSetAttribute = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function(name, value) {
+    if (this.tagName === 'IFRAME' && name.toLowerCase() === 'src') {
+      if (value && isAdUrl(value)) value = rewriteAdUrl(value);
+      else if (shouldProxy(value)) value = toProxyUrl(value);
+    }
+    return originalSetAttribute.call(this, name, value);
+  };
+  
+  // ═══════════════════════════════════════════════════════════
+  // OTHER ELEMENT OVERRIDES
   // ═══════════════════════════════════════════════════════════
   function overrideElementProperty(prototype, property) {
-    const descriptor = Object.getOwnPropertyDescriptor(prototype, property);
+    var descriptor = Object.getOwnPropertyDescriptor(prototype, property);
     if (!descriptor || !descriptor.set) return;
-    
-    const originalSetter = descriptor.set;
-    
+    var originalSetter = descriptor.set;
     Object.defineProperty(prototype, property, {
       get: descriptor.get,
       set: function(value) {
-        if (shouldProxy(value)) {
-          value = toProxyUrl(value);
-        }
+        if (shouldProxy(value)) value = toProxyUrl(value);
         return originalSetter.call(this, value);
       },
       configurable: true
     });
   }
   
-  // Override Image src
-  try {
-    overrideElementProperty(HTMLImageElement.prototype, 'src');
-  } catch(e) {}
-  
-  // Override Script src
-  try {
-    overrideElementProperty(HTMLScriptElement.prototype, 'src');
-  } catch(e) {}
-  
-  // Override IFrame src
-  try {
-    overrideElementProperty(HTMLIFrameElement.prototype, 'src');
-  } catch(e) {}
+  try { overrideElementProperty(HTMLImageElement.prototype, 'src'); } catch(e) {}
+  try { overrideElementProperty(HTMLScriptElement.prototype, 'src'); } catch(e) {}
   
   // ═══════════════════════════════════════════════════════════
-  // LOCATION OVERRIDE
+  // LOCATION OVERRIDE (with error handling)
   // ═══════════════════════════════════════════════════════════
-  const originalAssign = location.assign.bind(location);
-  location.assign = function(url) {
-    if (shouldProxy(url)) {
-      url = toProxyUrl(url);
-    }
-    return originalAssign(url);
-  };
+  try {
+    var originalAssign = location.assign.bind(location);
+    Object.defineProperty(location, 'assign', {
+      value: function(url) {
+        if (shouldProxy(url)) url = toProxyUrl(url);
+        return originalAssign(url);
+      },
+      writable: false, configurable: false
+    });
+  } catch(e) {}
   
-  const originalReplace = location.replace.bind(location);
-  location.replace = function(url) {
-    if (shouldProxy(url)) {
-      url = toProxyUrl(url);
-    }
-    return originalReplace(url);
-  };
+  try {
+    var originalReplace = location.replace.bind(location);
+    Object.defineProperty(location, 'replace', {
+      value: function(url) {
+        if (shouldProxy(url)) url = toProxyUrl(url);
+        return originalReplace(url);
+      },
+      writable: false, configurable: false
+    });
+  } catch(e) {}
   
   // ═══════════════════════════════════════════════════════════
   // WINDOW.OPEN OVERRIDE
   // ═══════════════════════════════════════════════════════════
-  const originalWindowOpen = window.open;
+  var originalWindowOpen = window.open;
   window.open = function(url) {
-    if (url && shouldProxy(url)) {
-      arguments[0] = toProxyUrl(url);
-    }
+    if (url && shouldProxy(url)) arguments[0] = toProxyUrl(url);
     return originalWindowOpen.apply(this, arguments);
   };
   
@@ -372,53 +449,29 @@ function getFetchOverrideScript() {
   // SENDBEACON OVERRIDE
   // ═══════════════════════════════════════════════════════════
   if (navigator.sendBeacon) {
-    const originalBeacon = navigator.sendBeacon.bind(navigator);
+    var originalBeacon = navigator.sendBeacon.bind(navigator);
     navigator.sendBeacon = function(url, data) {
-      if (shouldProxy(url)) {
-        url = toProxyUrl(url);
-      }
+      if (shouldProxy(url)) url = toProxyUrl(url);
       return originalBeacon(url, data);
     };
   }
   
   // ═══════════════════════════════════════════════════════════
-  // CLICK INTERCEPTION FOR AD URLS
+  // AD CLICK INTERCEPTION
   // ═══════════════════════════════════════════════════════════
-  const adClickDomains = [
-    'googleadservices.com',
-    'googleads.g.doubleclick.net',
-    'pagead2.googlesyndication.com',
-    'www.googleadservices.com'
-  ];
-  
-  function isAdClickUrl(url) {
-    try {
-      const hostname = new URL(url).hostname;
-      return adClickDomains.some(d => hostname.includes(d));
-    } catch {
-      return false;
-    }
-  }
-  
   document.addEventListener('click', function(e) {
-    const link = e.target.closest('a');
+    var link = e.target.closest('a');
     if (!link) return;
-    
-    const href = link.href;
-    if (!href) return;
-    
-    // Already proxied
-    if (href.includes('/p/')) return;
-    
-    // Check if ad click URL
-    if (isAdClickUrl(href)) {
+    var href = link.href;
+    if (!href || href.includes('/p/')) return;
+    if (isAdUrl(href)) {
       e.preventDefault();
       e.stopPropagation();
       window.location.href = toProxyUrl(href);
     }
   }, true);
   
-  console.log('[Proxy] Runtime overrides active');
+  console.log('[Proxy] Runtime overrides active' + (ORIGINAL_URL ? ', spoofing: ' + ORIGINAL_URL : ''));
 })();
 `;
 }
@@ -463,9 +516,9 @@ function processHtml(html, pageUrl, options = {}) {
   webrtcScript.text(getWebRtcBlockScript());
   head.prepend(webrtcScript);
   
-  // Fetch/XHR override script (SECOND)
+  // Fetch/XHR override script (SECOND) - pass original page URL for spoofing
   const fetchScript = $('<script></script>');
-  fetchScript.text(getFetchOverrideScript());
+  fetchScript.text(getFetchOverrideScript(pageUrl));
   webrtcScript.after(fetchScript);
   
   // ═══════════════════════════════════════════════════════════
