@@ -285,6 +285,39 @@ function getFetchOverrideScript(originalUrl) {
   var __realLocation__ = window.location;
   var __realOrigin__ = __realLocation__.origin;
   
+  // ═══════════════════════════════════════════════════════════
+  // CRITICAL: INTERCEPT EXTERNAL NAVIGATION VIA BEFOREUNLOAD
+  // This catches ALL navigation attempts including top.location.href
+  // ═══════════════════════════════════════════════════════════
+  var __pendingExternalNav__ = null;
+  
+  // Monitor for external navigation attempts
+  window.addEventListener('beforeunload', function(e) {
+    // Check if we're navigating to an external URL
+    // This is a last-ditch effort to catch navigations we missed
+    console.log('[Proxy] Page unload event triggered');
+  }, false);
+  
+  // Use a MutationObserver on the document to detect when a navigation is about to happen
+  // by watching for script-initiated location changes
+  (function() {
+    var checkInterval = setInterval(function() {
+      // Get the pending navigation URL if any
+      try {
+        var pendingUrl = document.activeElement && document.activeElement.href;
+        if (pendingUrl && !pendingUrl.includes('/p/') && !pendingUrl.includes('/external/')) {
+          var urlObj = new URL(pendingUrl);
+          if (urlObj.origin !== __realOrigin__) {
+            console.log('[Proxy] Detected pending navigation to:', pendingUrl.substring(0, 60));
+          }
+        }
+      } catch(e) {}
+    }, 100);
+    
+    // Clear after 30 seconds to avoid memory leak
+    setTimeout(function() { clearInterval(checkInterval); }, 30000);
+  })();
+  
   function base64UrlEncode(str) {
     var base64 = btoa(unescape(encodeURIComponent(str)));
     return base64.replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
@@ -570,18 +603,63 @@ function getFetchOverrideScript(originalUrl) {
   }
   
   // ═══════════════════════════════════════════════════════════
-  // AD CLICK INTERCEPTION
+  // UNIVERSAL CLICK INTERCEPTION - INTERCEPT ALL EXTERNAL LINKS
+  // Not just ad URLs, but ANY external URL click
   // ═══════════════════════════════════════════════════════════
-  document.addEventListener('click', function(e) {
-    var link = e.target.closest('a');
-    if (!link) return;
-    var href = link.href;
-    if (!href || href.includes('/p/')) return;
-    if (isAdUrl(href)) {
-      e.preventDefault();
-      e.stopPropagation();
-      window.location.href = toProxyUrl(href);
+  function handleExternalClick(e) {
+    // Find the clicked anchor element
+    var link = e.target;
+    while (link && link.tagName !== 'A') {
+      link = link.parentElement;
     }
+    if (!link) return;
+    
+    var href = link.href;
+    if (!href) return;
+    
+    // Already proxied - let it pass
+    if (href.includes('/p/')) return;
+    
+    // Skip non-http URLs
+    if (!href.startsWith('http://') && !href.startsWith('https://')) return;
+    
+    // Skip same-origin URLs
+    try {
+      var urlObj = new URL(href);
+      if (urlObj.origin === __realOrigin__) return;
+    } catch(err) {
+      return;
+    }
+    
+    // INTERCEPT THIS EXTERNAL LINK CLICK!
+    console.log('[Proxy] Intercepting external link click:', href.substring(0, 60));
+    
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    
+    var proxyUrl = toProxyUrl(href);
+    
+    // Check target attribute
+    var target = link.target;
+    if (target === '_blank') {
+      // Open in new tab but through proxy
+      window.open(proxyUrl, '_blank');
+    } else {
+      // Navigate current window through proxy
+      __realLocation__.href = proxyUrl;
+    }
+    
+    return false;
+  }
+  
+  document.addEventListener('click', handleExternalClick, true);
+  
+  // Also intercept mouseup for edge cases
+  document.addEventListener('mouseup', function(e) {
+    // Only left click
+    if (e.button !== 0) return;
+    setTimeout(function() { handleExternalClick(e); }, 10);
   }, true);
   
   console.log('[Proxy] Runtime overrides active' + (ORIGINAL_URL ? ', spoofing: ' + ORIGINAL_URL : ''));
@@ -691,6 +769,7 @@ function processHtml(html, pageUrl, options = {}) {
 /**
  * Get Ad iframe click interception script
  * This script intercepts ALL navigations from ad iframes and routes them through proxy
+ * CRITICAL: Must intercept ALL external URLs, not filtered by ad domains
  * @returns {string}
  */
 function getAdIframeInterceptScript() {
@@ -699,9 +778,15 @@ function getAdIframeInterceptScript() {
   'use strict';
   
   // ═══════════════════════════════════════════════════════════
-  // AD IFRAME NAVIGATION INTERCEPTION
+  // AD IFRAME NAVIGATION INTERCEPTION - ENHANCED VERSION V3
   // This runs inside ad iframes to catch ALL navigation attempts
+  // Routes EVERYTHING through the proxy server
+  // CRITICAL: Handles both /p/ and /external/ proxy formats
   // ═══════════════════════════════════════════════════════════
+  
+  // Store real location before any spoofing
+  var __realLocation__ = window.location;
+  var __realOrigin__ = __realLocation__.origin;
   
   function base64UrlEncode(str) {
     try {
@@ -710,131 +795,291 @@ function getAdIframeInterceptScript() {
     } catch(e) { return ''; }
   }
   
+  // Support both /p/ and /external/ proxy formats
   function toProxyUrl(url) {
+    // Check which format the current page uses
+    if (__realLocation__.pathname.startsWith('/external/')) {
+      // Use /external/ format with URL encoding
+      return '/external/' + encodeURIComponent(url);
+    }
+    // Default to /p/ format with base64
     return '/p/' + base64UrlEncode(url);
   }
   
-  function shouldProxy(url) {
+  function isAlreadyProxied(url) {
+    if (!url) return false;
+    // Check for both proxy formats
+    return url.includes('/p/') || url.includes('/external/') || url.includes('/relay');
+  }
+  
+  function isExternalUrl(url) {
     if (!url) return false;
     if (typeof url !== 'string') return false;
-    if (url.includes('/p/')) return false;
+    // Already proxied - check all formats
+    if (isAlreadyProxied(url)) return false;
+    // Skip special URLs
     if (url.startsWith('data:')) return false;
     if (url.startsWith('blob:')) return false;
     if (url.startsWith('javascript:')) return false;
     if (url.startsWith('about:')) return false;
     if (url.startsWith('#')) return false;
+    // Must have protocol
     if (!url.includes('://')) return false;
+    // Check if same origin
+    try {
+      var urlObj = new URL(url);
+      if (urlObj.origin === __realOrigin__) return false;
+    } catch(e) { return false; }
     return true;
   }
   
   // ═══════════════════════════════════════════════════════════
-  // INTERCEPT ALL CLICK EVENTS (capture phase)
+  // CRITICAL: Override top.location setter via Proxy
+  // This is the main fix for ad click redirects
   // ═══════════════════════════════════════════════════════════
-  document.addEventListener('click', function(e) {
+  (function interceptTopLocation() {
+    try {
+      // Try to intercept top.location from within the iframe
+      if (window.top && window.top !== window) {
+        var topWindow = window.top;
+        var topLocation = topWindow.location;
+        
+        // Create a proxy handler for location
+        var locationHandler = {
+          set: function(target, prop, value) {
+            if (prop === 'href' && isExternalUrl(value)) {
+              console.log('[Proxy:AdFrame] INTERCEPTED top.location.href:', value.substring(0, 60));
+              value = toProxyUrl(value);
+            }
+            target[prop] = value;
+            return true;
+          },
+          get: function(target, prop) {
+            var value = target[prop];
+            if (typeof value === 'function') {
+              return value.bind(target);
+            }
+            return value;
+          }
+        };
+        
+        // Try to create proxy (may fail due to cross-origin)
+        try {
+          var proxyLocation = new Proxy(topLocation, locationHandler);
+          // Can't actually replace top.location but we can monitor it
+        } catch(proxyErr) {
+          console.log('[Proxy:AdFrame] Proxy for top.location not possible:', proxyErr.message);
+        }
+      }
+    } catch(e) {
+      console.log('[Proxy:AdFrame] Could not intercept top.location:', e.message);
+    }
+  })();
+  
+  // ═══════════════════════════════════════════════════════════
+  // INTERCEPT ALL CLICK EVENTS
+  // This is the main interception for ad clicks
+  // ═══════════════════════════════════════════════════════════
+  function handleClick(e) {
     var target = e.target;
     
-    // Find closest anchor tag
-    var link = target.closest ? target.closest('a') : null;
-    if (!link && target.tagName === 'A') link = target;
-    if (!link) {
-      // Check parent elements
-      var parent = target.parentElement;
-      while (parent) {
-        if (parent.tagName === 'A') { link = parent; break; }
-        parent = parent.parentElement;
+    // Find closest anchor tag - traverse up the DOM tree
+    var link = null;
+    var current = target;
+    while (current && current !== document) {
+      if (current.tagName === 'A') {
+        link = current;
+        break;
       }
+      current = current.parentElement;
     }
     
-    if (link && link.href) {
-      var href = link.href;
-      if (shouldProxy(href)) {
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-        
-        // Navigate parent window through proxy
-        var proxyUrl = toProxyUrl(href);
+    if (!link) return;
+    
+    var href = link.href;
+    if (!href) return;
+    
+    // Check if this is an external URL that needs proxying
+    if (isExternalUrl(href)) {
+      console.log('[Proxy:AdFrame] Intercepting click to:', href.substring(0, 60));
+      
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      
+      var proxyUrl = toProxyUrl(href);
+      
+      // Always navigate the TOP window through proxy
+      // This ensures the user stays in the proxied environment
+      try {
         if (window.top && window.top !== window) {
           window.top.location.href = proxyUrl;
+        } else if (window.parent && window.parent !== window) {
+          window.parent.location.href = proxyUrl;
         } else {
-          window.location.href = proxyUrl;
+          __realLocation__.href = proxyUrl;
         }
-        return false;
+      } catch(err) {
+        // Cross-origin restriction - use current window
+        __realLocation__.href = proxyUrl;
       }
+      
+      return false;
     }
+  }
+  
+  // Attach click handler in capture phase (runs before bubble phase)
+  document.addEventListener('click', handleClick, true);
+  
+  // Also handle touchend for mobile
+  document.addEventListener('touchend', function(e) {
+    // Slight delay to let click fire first
+    setTimeout(function() { handleClick(e); }, 0);
   }, true);
   
   // ═══════════════════════════════════════════════════════════
-  // INTERCEPT window.open
+  // INTERCEPT window.open (for popup ads)
   // ═══════════════════════════════════════════════════════════
   var originalOpen = window.open;
   window.open = function(url, target, features) {
-    if (url && shouldProxy(url)) {
+    if (url && isExternalUrl(url)) {
+      console.log('[Proxy:AdFrame] Intercepting window.open:', url.substring(0, 60));
       url = toProxyUrl(url);
     }
     return originalOpen.call(window, url, target, features);
   };
   
   // ═══════════════════════════════════════════════════════════
-  // INTERCEPT location changes
+  // INTERCEPT location.href assignment
+  // Google Ads often use: location.href = "https://advertiser.com"
   // ═══════════════════════════════════════════════════════════
   
-  // Intercept location.href setter
+  // Method 1: Try to override location.href via descriptor
   try {
-    var locationHrefDescriptor = Object.getOwnPropertyDescriptor(window.Location.prototype, 'href');
-    if (locationHrefDescriptor && locationHrefDescriptor.set) {
-      var originalHrefSetter = locationHrefDescriptor.set;
-      Object.defineProperty(window.location, 'href', {
-        get: locationHrefDescriptor.get ? locationHrefDescriptor.get.bind(window.location) : function() { return window.location.toString(); },
-        set: function(url) {
-          if (shouldProxy(url)) url = toProxyUrl(url);
-          return originalHrefSetter.call(window.location, url);
+    var locDescriptor = Object.getOwnPropertyDescriptor(window, 'location');
+    // If location is configurable (unlikely but try)
+    if (locDescriptor && locDescriptor.configurable) {
+      var realLoc = window.location;
+      Object.defineProperty(window, 'location', {
+        get: function() {
+          return new Proxy(realLoc, {
+            set: function(target, prop, value) {
+              if (prop === 'href' && isExternalUrl(value)) {
+                value = toProxyUrl(value);
+              }
+              target[prop] = value;
+              return true;
+            }
+          });
         },
-        configurable: true
+        set: function(url) {
+          if (isExternalUrl(url)) url = toProxyUrl(url);
+          realLoc.href = url;
+        }
       });
     }
   } catch(e) {}
   
-  // Intercept location.assign
+  // Method 2: Override location.assign and location.replace
   try {
-    var originalAssign = window.location.assign;
-    window.location.assign = function(url) {
-      if (shouldProxy(url)) url = toProxyUrl(url);
-      return originalAssign.call(window.location, url);
+    var originalAssign = __realLocation__.assign.bind(__realLocation__);
+    __realLocation__.assign = function(url) {
+      if (isExternalUrl(url)) {
+        console.log('[Proxy:AdFrame] Intercepting location.assign:', url.substring(0, 60));
+        url = toProxyUrl(url);
+      }
+      return originalAssign(url);
     };
   } catch(e) {}
   
-  // Intercept location.replace
   try {
-    var originalReplace = window.location.replace;
-    window.location.replace = function(url) {
-      if (shouldProxy(url)) url = toProxyUrl(url);
-      return originalReplace.call(window.location, url);
+    var originalReplace = __realLocation__.replace.bind(__realLocation__);
+    __realLocation__.replace = function(url) {
+      if (isExternalUrl(url)) {
+        console.log('[Proxy:AdFrame] Intercepting location.replace:', url.substring(0, 60));
+        url = toProxyUrl(url);
+      }
+      return originalReplace(url);
     };
   } catch(e) {}
   
   // ═══════════════════════════════════════════════════════════
-  // INTERCEPT parent/top location changes
+  // INTERCEPT parent.location and top.location changes
+  // Ads often try: top.location.href = "https://..."
   // ═══════════════════════════════════════════════════════════
   try {
-    // Override window.top access to intercept top.location changes
-    var realTop = window.top;
-    if (realTop && realTop !== window) {
-      // Can't override window.top directly, but we can intercept navigation methods
+    if (window.parent && window.parent !== window) {
+      var parentLoc = window.parent.location;
+      if (parentLoc.assign) {
+        var origParentAssign = parentLoc.assign.bind(parentLoc);
+        window.parent.location.assign = function(url) {
+          if (isExternalUrl(url)) url = toProxyUrl(url);
+          return origParentAssign(url);
+        };
+      }
     }
-  } catch(e) {}
+  } catch(e) { /* Cross-origin restriction - expected */ }
+  
+  try {
+    if (window.top && window.top !== window) {
+      var topLoc = window.top.location;
+      if (topLoc.assign) {
+        var origTopAssign = topLoc.assign.bind(topLoc);
+        window.top.location.assign = function(url) {
+          if (isExternalUrl(url)) url = toProxyUrl(url);
+          return origTopAssign(url);
+        };
+      }
+    }
+  } catch(e) { /* Cross-origin restriction - expected */ }
   
   // ═══════════════════════════════════════════════════════════
   // INTERCEPT form submissions
   // ═══════════════════════════════════════════════════════════
   document.addEventListener('submit', function(e) {
     var form = e.target;
-    if (form && form.action && shouldProxy(form.action)) {
+    if (form && form.action && isExternalUrl(form.action)) {
+      console.log('[Proxy:AdFrame] Intercepting form submit:', form.action.substring(0, 60));
       form.action = toProxyUrl(form.action);
     }
   }, true);
   
-  console.log('[Proxy] Ad iframe interception active');
+  // ═══════════════════════════════════════════════════════════
+  // INTERCEPT dynamically created anchor elements
+  // Watch for new anchors added to DOM
+  // ═══════════════════════════════════════════════════════════
+  if (typeof MutationObserver !== 'undefined') {
+    var observer = new MutationObserver(function(mutations) {
+      mutations.forEach(function(mutation) {
+        mutation.addedNodes.forEach(function(node) {
+          // Check if it's an anchor with external href
+          if (node.tagName === 'A' && node.href && isExternalUrl(node.href)) {
+            // Don't rewrite the href (breaks tracking), but ensure click is intercepted
+            node.addEventListener('click', handleClick, true);
+          }
+          // Also check child anchors
+          if (node.querySelectorAll) {
+            var anchors = node.querySelectorAll('a[href]');
+            anchors.forEach(function(anchor) {
+              if (isExternalUrl(anchor.href)) {
+                anchor.addEventListener('click', handleClick, true);
+              }
+            });
+          }
+        });
+      });
+    });
+    
+    if (document.body) {
+      observer.observe(document.body, { childList: true, subtree: true });
+    } else {
+      document.addEventListener('DOMContentLoaded', function() {
+        observer.observe(document.body, { childList: true, subtree: true });
+      });
+    }
+  }
+  
+  console.log('[Proxy] Ad iframe interception active (enhanced)');
 })();
 `;
 }

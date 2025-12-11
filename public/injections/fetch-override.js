@@ -102,6 +102,7 @@
   
   /**
    * Check if URL should be proxied
+   * V2: Now handles both /p/ and /external/ proxy formats
    */
   function shouldProxy(url) {
     if (!url) return false;
@@ -113,8 +114,11 @@
       else return false;
     }
     
-    // Skip already proxied URLs
+    // Skip already proxied URLs - check ALL proxy formats
     if (url.includes('/p/')) return false;
+    if (url.includes('/external/')) return false;
+    if (url.includes('/relay?')) return false;
+    if (url.includes('/browse')) return false;
     
     // Skip special URLs
     if (url.startsWith('data:')) return false;
@@ -243,6 +247,7 @@
     Object.defineProperty(location, 'assign', {
       value: function(url) {
         if (shouldProxy(url)) {
+          console.log('[Proxy] Intercepting location.assign:', url.substring(0, 60));
           url = toProxyUrl(url);
         }
         return originalAssign(url);
@@ -257,6 +262,7 @@
     Object.defineProperty(location, 'replace', {
       value: function(url) {
         if (shouldProxy(url)) {
+          console.log('[Proxy] Intercepting location.replace:', url.substring(0, 60));
           url = toProxyUrl(url);
         }
         return originalReplace(url);
@@ -264,6 +270,32 @@
       writable: false,
       configurable: false
     });
+  } catch(e) {}
+  
+  // ═══════════════════════════════════════════════════════════════════════
+  // HISTORY API INTERCEPTION (for SPA-style navigations)
+  // ═══════════════════════════════════════════════════════════════════════
+  
+  try {
+    const originalPushState = history.pushState.bind(history);
+    history.pushState = function(state, title, url) {
+      if (url && shouldProxy(url)) {
+        console.log('[Proxy] Intercepting pushState:', url);
+        url = toProxyUrl(url);
+      }
+      return originalPushState(state, title, url);
+    };
+  } catch(e) {}
+  
+  try {
+    const originalReplaceState = history.replaceState.bind(history);
+    history.replaceState = function(state, title, url) {
+      if (url && shouldProxy(url)) {
+        console.log('[Proxy] Intercepting replaceState:', url);
+        url = toProxyUrl(url);
+      }
+      return originalReplaceState(state, title, url);
+    };
   } catch(e) {}
   
   // ═══════════════════════════════════════════════════════════════════════
@@ -430,27 +462,114 @@
   }
   
   // ═══════════════════════════════════════════════════════════════════════
-  // AD CLICK INTERCEPTION
+  // HTMLAnchorElement HREF OVERRIDE
+  // Intercept when JavaScript dynamically sets anchor.href
   // ═══════════════════════════════════════════════════════════════════════
   
-  // Intercept clicks on ad links
+  try {
+    const anchorHrefDescriptor = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'href');
+    if (anchorHrefDescriptor && anchorHrefDescriptor.set) {
+      const originalAnchorHrefSetter = anchorHrefDescriptor.set;
+      Object.defineProperty(HTMLAnchorElement.prototype, 'href', {
+        get: anchorHrefDescriptor.get,
+        set: function(value) {
+          // Don't rewrite here, let click handler do it
+          // Just pass through - rewriting href breaks ad tracking
+          return originalAnchorHrefSetter.call(this, value);
+        },
+        configurable: true,
+        enumerable: anchorHrefDescriptor.enumerable
+      });
+    }
+  } catch(e) {
+    console.log('[Proxy] Could not override anchor href:', e.message);
+  }
+  
+  // ═══════════════════════════════════════════════════════════════════════
+  // UNIVERSAL CLICK INTERCEPTION
+  // Intercept ALL clicks on links to external URLs, not just ad URLs
+  // This is CRITICAL for ad click-through to work via proxy
+  // ═══════════════════════════════════════════════════════════════════════
+  
+  // Intercept ALL external link clicks (not just ad URLs)
   document.addEventListener('click', function(e) {
-    const link = e.target.closest('a');
+    // Find the clicked anchor element
+    let link = e.target;
+    while (link && link.tagName !== 'A') {
+      link = link.parentElement;
+    }
     if (!link) return;
     
     const href = link.href;
     if (!href) return;
     
-    // Already proxied
+    // Already proxied - let it pass
     if (href.includes('/p/')) return;
     
-    // Check if ad click URL
-    if (isAdUrl(href)) {
-      e.preventDefault();
-      e.stopPropagation();
-      window.location.href = toProxyUrl(href);
+    // Skip non-http URLs
+    if (!href.startsWith('http://') && !href.startsWith('https://')) return;
+    
+    // Skip same-origin URLs
+    try {
+      const urlObj = new URL(href);
+      if (urlObj.origin === window.location.origin) return;
+    } catch(err) {
+      return;
     }
-  }, true); // Capture phase
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // INTERCEPT THIS EXTERNAL LINK CLICK!
+    // Route through proxy regardless of whether it's an "ad URL" or not
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    console.log('[Proxy] Intercepting external link click:', href.substring(0, 60));
+    
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    
+    // Navigate through proxy
+    const proxyUrl = toProxyUrl(href);
+    
+    // Check target attribute
+    const target = link.target;
+    if (target === '_blank') {
+      // Open in new tab but through proxy
+      window.open(proxyUrl, '_blank');
+    } else {
+      // Navigate current window through proxy
+      window.location.href = proxyUrl;
+    }
+    
+    return false;
+  }, true); // Capture phase - runs before other handlers
+  
+  // Also intercept on mousedown for sites that use mousedown instead of click
+  document.addEventListener('mousedown', function(e) {
+    // Only handle left-click
+    if (e.button !== 0) return;
+    
+    let link = e.target;
+    while (link && link.tagName !== 'A') {
+      link = link.parentElement;
+    }
+    if (!link) return;
+    
+    const href = link.href;
+    if (!href) return;
+    if (href.includes('/p/')) return;
+    if (!href.startsWith('http://') && !href.startsWith('https://')) return;
+    
+    try {
+      const urlObj = new URL(href);
+      if (urlObj.origin === window.location.origin) return;
+    } catch(err) {
+      return;
+    }
+    
+    // Store the proxy URL in a data attribute for the click handler
+    link.setAttribute('data-proxy-url', toProxyUrl(href));
+  }, true);
   
   console.log('[Proxy] Runtime overrides active');
   if (ORIGINAL_URL) {

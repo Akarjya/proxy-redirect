@@ -78,10 +78,11 @@ function base64UrlDecode(encoded) {
 
 /**
  * Check if request should be proxied
+ * V2: Handles both /p/ and /external/ formats
  */
 function isProxyRequest(url) {
   const urlObj = new URL(url);
-  return urlObj.pathname.startsWith('/p/');
+  return urlObj.pathname.startsWith('/p/') || urlObj.pathname.startsWith('/external/');
 }
 
 /**
@@ -102,13 +103,36 @@ function isStaticAsset(url) {
 }
 
 /**
+ * Check if URL is an external URL that should be proxied
+ */
+function isExternalUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    // External if different origin from our service worker
+    return urlObj.origin !== self.location.origin;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Convert external URL to proxy URL
+ */
+function externalToProxyUrl(url) {
+  const encoded = base64UrlEncode(url);
+  return new URL('/p/' + encoded, self.location.origin).toString();
+}
+
+/**
  * Fetch event - Intercepts all network requests
+ * Enhanced to also catch external navigation attempts
+ * V2: Improved to catch ALL external URLs regardless of request mode
  */
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   const url = request.url;
   
-  console.log('[SW] Fetch event:', url.substring(0, 60));
+  console.log('[SW] Fetch event:', url.substring(0, 60), 'mode:', request.mode, 'dest:', request.destination);
   
   // Check if this is a proxy request (/p/*)
   if (isProxyRequest(url)) {
@@ -123,9 +147,66 @@ self.addEventListener('fetch', (event) => {
     return; // Default browser handling
   }
   
+  // ═══════════════════════════════════════════════════════════
+  // CRITICAL FIX: Intercept ALL external URL requests
+  // Not just 'navigate' mode - also catch 'no-cors' and other modes
+  // This catches ad clicks that use top.location.href
+  // ═══════════════════════════════════════════════════════════
+  if (isExternalUrl(url)) {
+    // Check if this is any kind of navigation
+    const isNavigation = request.mode === 'navigate' || 
+                        request.destination === 'document' ||
+                        request.destination === '' ||  // Some navigations have empty destination
+                        request.redirect === 'follow';
+    
+    // Check for Google ad click URLs specifically
+    const isAdClickUrl = url.includes('googleadservices.com/pagead/aclk') ||
+                        url.includes('googleads.g.doubleclick.net/dbm/clk') ||
+                        url.includes('doubleclick.net/pcs/click') ||
+                        url.includes('/pagead/aclk');
+    
+    if (isNavigation || isAdClickUrl) {
+      console.log('[SW] INTERCEPTING EXTERNAL NAVIGATION:', url.substring(0, 80));
+      console.log('[SW] Request details - mode:', request.mode, 'destination:', request.destination);
+      
+      // Redirect to proxy URL
+      const proxyUrl = externalToProxyUrl(url);
+      event.respondWith(Response.redirect(proxyUrl, 302));
+      return;
+    }
+    
+    // For non-navigation external requests (images, scripts, etc.)
+    console.log('[SW] Intercepting external resource:', url.substring(0, 60));
+    event.respondWith(handleExternalResource(event, url));
+    return;
+  }
+  
   // For any other same-origin requests, pass through
   console.log('[SW] Other request, passing through');
 });
+
+/**
+ * Handle external resource requests (images, scripts, etc.)
+ */
+async function handleExternalResource(event, url) {
+  try {
+    // Convert to proxy URL and fetch
+    const encoded = base64UrlEncode(url);
+    const proxyApiUrl = new URL('/api/proxy', self.location.origin);
+    proxyApiUrl.searchParams.set('url', encoded);
+    
+    const response = await fetch(proxyApiUrl.toString(), {
+      method: event.request.method,
+      headers: event.request.headers,
+      credentials: 'include'
+    });
+    
+    return response;
+  } catch (error) {
+    console.error('[SW] External resource proxy error:', error);
+    return new Response('Proxy Error: ' + error.message, { status: 502 });
+  }
+}
 
 /**
  * Handle proxy request - Forward to backend
