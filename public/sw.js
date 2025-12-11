@@ -184,7 +184,7 @@ self.addEventListener('fetch', (event) => {
   // These are URLs that have already been converted to proxy format
   // ═══════════════════════════════════════════════════════════
   if (isProxyRequest(url)) {
-    console.log('[SW V5] Handling proxy request');
+    console.log(`[SW ${SW_VERSION}] Handling proxy request`);
     event.respondWith(handleProxyRequest(event));
     return;
   }
@@ -194,7 +194,7 @@ self.addEventListener('fetch', (event) => {
   // These are our own server resources, not external
   // ═══════════════════════════════════════════════════════════
   if (isStaticAsset(url)) {
-    console.log('[SW V5] Static asset, passing through');
+    console.log(`[SW ${SW_VERSION}] Static asset, passing through`);
     return; // Default browser handling
   }
   
@@ -204,28 +204,36 @@ self.addEventListener('fetch', (event) => {
   // ═══════════════════════════════════════════════════════════
   if (isExternalUrl(url)) {
     
-    // CRITICAL: ALWAYS proxy iframe destinations
-    // Google Ads creates iframes dynamically, and we MUST intercept them
-    // destination === 'iframe' means this is an iframe src request
-    // destination === '' can also indicate iframe requests with various modes (cors, no-cors, same-origin)
-    // We check for multiple modes because iframes can use different CORS policies
-    if (destination === 'iframe' || (destination === '' && (mode === 'no-cors' || mode === 'cors' || mode === 'same-origin'))) {
-      console.log(`[SW ${SW_VERSION}] 🎯 IFRAME DETECTED - FORCING PROXY:`, url.substring(0, 100));
+    // ═══════════════════════════════════════════════════════════
+    // CRITICAL FIX: Check iframe destination FIRST before anything else
+    // Google Ad iframes have destination === 'iframe' with mode === 'navigate'
+    // We MUST proxy them, not redirect them!
+    // ═══════════════════════════════════════════════════════════
+    if (destination === 'iframe') {
+      console.log(`[SW ${SW_VERSION}] 🎯 IFRAME DETECTED (dest=iframe, mode=${mode}) - FORCING PROXY:`, url.substring(0, 100));
       event.respondWith(handleExternalResource(event, url));
       return;
     }
     
-    // Determine if this is a top-level navigation
+    // Also catch iframes with empty destination (some browsers)
+    if (destination === '' && (mode === 'no-cors' || mode === 'cors' || mode === 'same-origin')) {
+      console.log(`[SW ${SW_VERSION}] 🎯 IFRAME DETECTED (dest='', mode=${mode}) - FORCING PROXY:`, url.substring(0, 100));
+      event.respondWith(handleExternalResource(event, url));
+      return;
+    }
+    
+    // Determine if this is a top-level navigation (NOT iframe navigation)
     // Navigation = user clicking a link or typing in address bar
+    // At this point, we've already handled iframe navigations above
     const isNavigation = mode === 'navigate';
     
-    // For navigations, we REDIRECT so the URL bar shows the proxy URL
+    // For TOP-LEVEL navigations only, we REDIRECT so the URL bar shows the proxy URL
     // This includes:
     // - User clicking external links
     // - Ad click URLs (which redirect to advertiser sites)
     // - Form submissions to external URLs
     if (isNavigation) {
-      console.log('[SW V5] REDIRECT NAVIGATION:', url.substring(0, 100));
+      console.log(`[SW ${SW_VERSION}] 🔄 TOP-LEVEL NAVIGATION - REDIRECTING:`, url.substring(0, 100));
       const proxyUrl = externalToProxyUrl(url);
       event.respondWith(Response.redirect(proxyUrl, 302));
       return;
@@ -233,14 +241,13 @@ self.addEventListener('fetch', (event) => {
     
     // For ALL other external requests, we FETCH through proxy
     // This includes (but not limited to):
-    // - Iframes (Google Ads, etc.) - handled above
     // - Scripts
     // - Stylesheets  
     // - Images
     // - Fonts
     // - XHR/Fetch requests
     // - Web sockets (where possible)
-    console.log('[SW V5] PROXY EXTERNAL:', destination || 'unknown', url.substring(0, 80));
+    console.log(`[SW ${SW_VERSION}] 📡 PROXY EXTERNAL:`, destination || 'unknown', url.substring(0, 80));
     event.respondWith(handleExternalResource(event, url));
     return;
   }
@@ -249,7 +256,7 @@ self.addEventListener('fetch', (event) => {
   // STEP 4: Same-origin requests pass through normally
   // These are requests to our own domain that aren't /p/* or /api/*
   // ═══════════════════════════════════════════════════════════
-  console.log('[SW V5] Same-origin, passing through');
+  console.log(`[SW ${SW_VERSION}] Same-origin, passing through`);
 });
 
 /**
