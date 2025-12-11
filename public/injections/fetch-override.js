@@ -293,6 +293,31 @@
   }
   
   // ═══════════════════════════════════════════════════════════════════════
+  // FETCHLATER API OVERRIDE (Chrome 121+)
+  // This new API can leak requests outside the proxy
+  // ═══════════════════════════════════════════════════════════════════════
+  
+  if (typeof window.fetchLater === 'function') {
+    const originalFetchLater = window.fetchLater;
+    window.fetchLater = function(input, init) {
+      let url;
+      if (typeof input === 'string') url = input;
+      else if (input instanceof URL) url = input.href;
+      else if (input instanceof Request) url = input.url;
+      
+      if (shouldProxy(url)) {
+        const proxyUrl = toProxyUrl(url);
+        if (input instanceof Request) {
+          input = new Request(proxyUrl, input);
+        } else {
+          input = proxyUrl;
+        }
+      }
+      return originalFetchLater.call(this, input, init);
+    };
+  }
+  
+  // ═══════════════════════════════════════════════════════════════════════
   // GOOGLE ADS URL REWRITING
   // ═══════════════════════════════════════════════════════════════════════
   

@@ -457,6 +457,41 @@ function getFetchOverrideScript(originalUrl) {
   }
   
   // ═══════════════════════════════════════════════════════════
+  // FETCHLATER API OVERRIDE (Chrome 121+)
+  // This API can leak requests outside proxy
+  // ═══════════════════════════════════════════════════════════
+  if (typeof window.fetchLater === 'function') {
+    var originalFetchLater = window.fetchLater;
+    window.fetchLater = function(input, init) {
+      var url;
+      if (typeof input === 'string') url = input;
+      else if (input instanceof URL) url = input.href;
+      else if (input instanceof Request) url = input.url;
+      
+      if (shouldProxy(url)) {
+        var proxyUrl = toProxyUrl(url);
+        if (input instanceof Request) input = new Request(proxyUrl, input);
+        else input = proxyUrl;
+      }
+      return originalFetchLater.call(this, input, init);
+    };
+  }
+  
+  // ═══════════════════════════════════════════════════════════
+  // SCHEDULER.POSTTASK OVERRIDE (for background fetch)
+  // ═══════════════════════════════════════════════════════════
+  if (typeof scheduler !== 'undefined' && scheduler.postTask) {
+    var originalPostTask = scheduler.postTask.bind(scheduler);
+    scheduler.postTask = function(callback, options) {
+      // Wrap callback to intercept any fetch calls
+      var wrappedCallback = function() {
+        return callback.apply(this, arguments);
+      };
+      return originalPostTask(wrappedCallback, options);
+    };
+  }
+  
+  // ═══════════════════════════════════════════════════════════
   // AD CLICK INTERCEPTION
   // ═══════════════════════════════════════════════════════════
   document.addEventListener('click', function(e) {
@@ -576,7 +611,159 @@ function processHtml(html, pageUrl, options = {}) {
 }
 
 /**
- * Process Google ad iframe/content HTML (same rewriting, no script injection)
+ * Get Ad iframe click interception script
+ * This script intercepts ALL navigations from ad iframes and routes them through proxy
+ * @returns {string}
+ */
+function getAdIframeInterceptScript() {
+  return `
+(function() {
+  'use strict';
+  
+  // ═══════════════════════════════════════════════════════════
+  // AD IFRAME NAVIGATION INTERCEPTION
+  // This runs inside ad iframes to catch ALL navigation attempts
+  // ═══════════════════════════════════════════════════════════
+  
+  function base64UrlEncode(str) {
+    try {
+      var base64 = btoa(unescape(encodeURIComponent(str)));
+      return base64.replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+    } catch(e) { return ''; }
+  }
+  
+  function toProxyUrl(url) {
+    return '/p/' + base64UrlEncode(url);
+  }
+  
+  function shouldProxy(url) {
+    if (!url) return false;
+    if (typeof url !== 'string') return false;
+    if (url.includes('/p/')) return false;
+    if (url.startsWith('data:')) return false;
+    if (url.startsWith('blob:')) return false;
+    if (url.startsWith('javascript:')) return false;
+    if (url.startsWith('about:')) return false;
+    if (url.startsWith('#')) return false;
+    if (!url.includes('://')) return false;
+    return true;
+  }
+  
+  // ═══════════════════════════════════════════════════════════
+  // INTERCEPT ALL CLICK EVENTS (capture phase)
+  // ═══════════════════════════════════════════════════════════
+  document.addEventListener('click', function(e) {
+    var target = e.target;
+    
+    // Find closest anchor tag
+    var link = target.closest ? target.closest('a') : null;
+    if (!link && target.tagName === 'A') link = target;
+    if (!link) {
+      // Check parent elements
+      var parent = target.parentElement;
+      while (parent) {
+        if (parent.tagName === 'A') { link = parent; break; }
+        parent = parent.parentElement;
+      }
+    }
+    
+    if (link && link.href) {
+      var href = link.href;
+      if (shouldProxy(href)) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        
+        // Navigate parent window through proxy
+        var proxyUrl = toProxyUrl(href);
+        if (window.top && window.top !== window) {
+          window.top.location.href = proxyUrl;
+        } else {
+          window.location.href = proxyUrl;
+        }
+        return false;
+      }
+    }
+  }, true);
+  
+  // ═══════════════════════════════════════════════════════════
+  // INTERCEPT window.open
+  // ═══════════════════════════════════════════════════════════
+  var originalOpen = window.open;
+  window.open = function(url, target, features) {
+    if (url && shouldProxy(url)) {
+      url = toProxyUrl(url);
+    }
+    return originalOpen.call(window, url, target, features);
+  };
+  
+  // ═══════════════════════════════════════════════════════════
+  // INTERCEPT location changes
+  // ═══════════════════════════════════════════════════════════
+  
+  // Intercept location.href setter
+  try {
+    var locationHrefDescriptor = Object.getOwnPropertyDescriptor(window.Location.prototype, 'href');
+    if (locationHrefDescriptor && locationHrefDescriptor.set) {
+      var originalHrefSetter = locationHrefDescriptor.set;
+      Object.defineProperty(window.location, 'href', {
+        get: locationHrefDescriptor.get ? locationHrefDescriptor.get.bind(window.location) : function() { return window.location.toString(); },
+        set: function(url) {
+          if (shouldProxy(url)) url = toProxyUrl(url);
+          return originalHrefSetter.call(window.location, url);
+        },
+        configurable: true
+      });
+    }
+  } catch(e) {}
+  
+  // Intercept location.assign
+  try {
+    var originalAssign = window.location.assign;
+    window.location.assign = function(url) {
+      if (shouldProxy(url)) url = toProxyUrl(url);
+      return originalAssign.call(window.location, url);
+    };
+  } catch(e) {}
+  
+  // Intercept location.replace
+  try {
+    var originalReplace = window.location.replace;
+    window.location.replace = function(url) {
+      if (shouldProxy(url)) url = toProxyUrl(url);
+      return originalReplace.call(window.location, url);
+    };
+  } catch(e) {}
+  
+  // ═══════════════════════════════════════════════════════════
+  // INTERCEPT parent/top location changes
+  // ═══════════════════════════════════════════════════════════
+  try {
+    // Override window.top access to intercept top.location changes
+    var realTop = window.top;
+    if (realTop && realTop !== window) {
+      // Can't override window.top directly, but we can intercept navigation methods
+    }
+  } catch(e) {}
+  
+  // ═══════════════════════════════════════════════════════════
+  // INTERCEPT form submissions
+  // ═══════════════════════════════════════════════════════════
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    if (form && form.action && shouldProxy(form.action)) {
+      form.action = toProxyUrl(form.action);
+    }
+  }, true);
+  
+  console.log('[Proxy] Ad iframe interception active');
+})();
+`;
+}
+
+/**
+ * Process Google ad iframe/content HTML
+ * Now includes script injection to intercept ad clicks and navigations
  * @param {string} html - Original HTML
  * @param {string} pageUrl - URL of the content
  * @returns {string} - Processed HTML
@@ -590,7 +777,47 @@ function processGoogleAdHtml(html, pageUrl) {
   // Use page URL as base
   const baseUrl = pageUrl;
   
-  // Rewrite URL attributes (same as main page)
+  // ═══════════════════════════════════════════════════════════
+  // INJECT INTERCEPTION SCRIPT AT THE VERY START
+  // This MUST run before any ad scripts
+  // ═══════════════════════════════════════════════════════════
+  let head = $('head');
+  if (head.length === 0) {
+    // If no head, prepend to html or body
+    if ($('html').length > 0) {
+      $('html').prepend('<head></head>');
+      head = $('head');
+    } else if ($('body').length > 0) {
+      $('body').prepend('<script>' + getAdIframeInterceptScript() + '</script>');
+    } else {
+      // Prepend to entire document
+      const script = '<script>' + getAdIframeInterceptScript() + '</script>';
+      return script + $.html();
+    }
+  }
+  
+  if (head.length > 0) {
+    const interceptScript = $('<script></script>');
+    interceptScript.text(getAdIframeInterceptScript());
+    head.prepend(interceptScript);
+  }
+  
+  // ═══════════════════════════════════════════════════════════
+  // MODIFY TARGET ATTRIBUTES TO PREVENT TOP NAVIGATION
+  // Change target="_top" and target="_blank" to target="_self" 
+  // so clicks stay in the proxied context
+  // ═══════════════════════════════════════════════════════════
+  $('a[target="_top"], a[target="_blank"], a[target="_parent"]').each((i, elem) => {
+    $(elem).attr('target', '_self');
+  });
+  
+  $('form[target="_top"], form[target="_blank"], form[target="_parent"]').each((i, elem) => {
+    $(elem).attr('target', '_self');
+  });
+  
+  // ═══════════════════════════════════════════════════════════
+  // REWRITE URL ATTRIBUTES
+  // ═══════════════════════════════════════════════════════════
   for (const [tag, attrs] of Object.entries(URL_ATTRIBUTES)) {
     $(tag).each((i, elem) => {
       const $elem = $(elem);
@@ -615,7 +842,9 @@ function processGoogleAdHtml(html, pageUrl) {
     });
   }
   
-  // Rewrite inline styles
+  // ═══════════════════════════════════════════════════════════
+  // REWRITE INLINE STYLES
+  // ═══════════════════════════════════════════════════════════
   $('[style]').each((i, elem) => {
     const $elem = $(elem);
     const style = $elem.attr('style');
@@ -624,7 +853,9 @@ function processGoogleAdHtml(html, pageUrl) {
     }
   });
   
-  // Rewrite <style> content
+  // ═══════════════════════════════════════════════════════════
+  // REWRITE <style> TAG CONTENT
+  // ═══════════════════════════════════════════════════════════
   $('style').each((i, elem) => {
     const $elem = $(elem);
     const css = $elem.html();
@@ -644,6 +875,7 @@ module.exports = {
   shouldSkipUrl,
   rewriteSrcset,
   getWebRtcBlockScript,
-  getFetchOverrideScript
+  getFetchOverrideScript,
+  getAdIframeInterceptScript
 };
 
