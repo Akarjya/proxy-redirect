@@ -11,16 +11,17 @@
  * - Ensures ALL ad requests go through proxy server
  */
 
-// Cache name - increment to force SW update
-const CACHE_NAME = 'proxy-poc-v5';
+// FORCE UPDATE: Version with timestamp to bypass browser cache
+const SW_VERSION = 'v5-2024-12-11-force-update';
+const CACHE_NAME = 'proxy-poc-v5-' + Date.now();
 
 /**
  * Install event - Called when SW is first installed
  */
 self.addEventListener('install', (event) => {
-  console.log('[SW] Installing...');
+  console.log(`[SW ${SW_VERSION}] Installing... FORCING IMMEDIATE ACTIVATION`);
   
-  // Skip waiting to activate immediately
+  // Skip waiting to activate immediately - FORCE UPDATE
   self.skipWaiting();
 });
 
@@ -28,10 +29,24 @@ self.addEventListener('install', (event) => {
  * Activate event - Called when SW becomes active
  */
 self.addEventListener('activate', (event) => {
-  console.log('[SW] Activated');
+  console.log(`[SW ${SW_VERSION}] ✅ ACTIVATED - ENHANCED IFRAME INTERCEPTION READY`);
   
   // Claim all clients immediately (don't wait for refresh)
-  event.waitUntil(clients.claim());
+  event.waitUntil(
+    caches.keys().then((cacheNames) => {
+      return Promise.all(
+        cacheNames.map((cacheName) => {
+          if (cacheName !== CACHE_NAME) {
+            console.log(`[SW ${SW_VERSION}] Clearing old cache: ${cacheName}`);
+            return caches.delete(cacheName);
+          }
+        })
+      );
+    }).then(() => {
+      console.log(`[SW ${SW_VERSION}] Claiming all clients`);
+      return clients.claim();
+    })
+  );
 });
 
 /**
@@ -157,7 +172,7 @@ self.addEventListener('fetch', (event) => {
   const mode = request.mode;
   
   // Detailed logging for debugging
-  console.log('[SW V5] Fetch:', {
+  console.log(`[SW ${SW_VERSION}] Fetch:`, {
     url: url.substring(0, 80),
     mode: mode,
     dest: destination,
@@ -195,7 +210,7 @@ self.addEventListener('fetch', (event) => {
     // destination === '' can also indicate iframe requests with various modes (cors, no-cors, same-origin)
     // We check for multiple modes because iframes can use different CORS policies
     if (destination === 'iframe' || (destination === '' && (mode === 'no-cors' || mode === 'cors' || mode === 'same-origin'))) {
-      console.log('[SW V5] 🎯 IFRAME DETECTED - FORCING PROXY:', url.substring(0, 100));
+      console.log(`[SW ${SW_VERSION}] 🎯 IFRAME DETECTED - FORCING PROXY:`, url.substring(0, 100));
       event.respondWith(handleExternalResource(event, url));
       return;
     }
@@ -374,9 +389,10 @@ self.addEventListener('message', (event) => {
   const { type, data } = event.data || {};
   
   if (type === 'SKIP_WAITING') {
+    console.log(`[SW ${SW_VERSION}] Force update requested`);
     self.skipWaiting();
   }
 });
 
-console.log('[SW V5] Service Worker loaded - Enhanced iframe interception enabled');
+console.log(`[SW ${SW_VERSION}] ✅ Service Worker LOADED - Enhanced iframe interception ENABLED`);
 
