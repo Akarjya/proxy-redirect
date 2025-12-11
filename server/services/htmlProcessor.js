@@ -278,8 +278,12 @@ function getFetchOverrideScript(originalUrl) {
   }
   
   // ═══════════════════════════════════════════════════════════
-  // UTILITY FUNCTIONS
+  // UTILITY FUNCTIONS (MUST BE FIRST - used by location spoofing)
   // ═══════════════════════════════════════════════════════════
+  
+  // Store real location BEFORE any spoofing
+  var __realLocation__ = window.location;
+  var __realOrigin__ = __realLocation__.origin;
   
   function base64UrlEncode(str) {
     var base64 = btoa(unescape(encodeURIComponent(str)));
@@ -294,19 +298,93 @@ function getFetchOverrideScript(originalUrl) {
       else return false;
     }
     if (url.includes('/p/')) return false;
+    if (url.includes('/external/')) return false;
     if (url.startsWith('data:')) return false;
     if (url.startsWith('blob:')) return false;
     if (url.startsWith('javascript:')) return false;
     if (!url.includes('://')) return false;
     try {
       var urlObj = new URL(url);
-      if (urlObj.origin === window.location.origin) return false;
+      // Use stored real origin for comparison
+      if (urlObj.origin === __realOrigin__) return false;
     } catch(e) {}
     return true;
   }
   
   function toProxyUrl(url) {
     return '/p/' + base64UrlEncode(url);
+  }
+  
+  // ═══════════════════════════════════════════════════════════
+  // WINDOW.LOCATION SPOOFING (CRITICAL FOR REDIRECT PREVENTION)
+  // ═══════════════════════════════════════════════════════════
+  if (ORIGINAL_URL && ORIGINAL_URL_OBJ) {
+    // Create a fake location-like object
+    var fakeLocation = {
+      get href() { return ORIGINAL_URL; },
+      set href(url) { 
+        if (shouldProxy(url)) url = toProxyUrl(url);
+        __realLocation__.href = url; 
+      },
+      get protocol() { return ORIGINAL_URL_OBJ.protocol; },
+      get host() { return ORIGINAL_URL_OBJ.host; },
+      get hostname() { return ORIGINAL_URL_OBJ.hostname; },
+      get port() { return ORIGINAL_URL_OBJ.port; },
+      get pathname() { return ORIGINAL_URL_OBJ.pathname; },
+      get search() { return ORIGINAL_URL_OBJ.search; },
+      get hash() { return ORIGINAL_URL_OBJ.hash; },
+      get origin() { return ORIGINAL_URL_OBJ.origin; },
+      assign: function(url) {
+        if (shouldProxy(url)) url = toProxyUrl(url);
+        __realLocation__.assign(url);
+      },
+      replace: function(url) {
+        if (shouldProxy(url)) url = toProxyUrl(url);
+        __realLocation__.replace(url);
+      },
+      reload: function() { __realLocation__.reload(); },
+      toString: function() { return ORIGINAL_URL; }
+    };
+    
+    // Try to override window.location (may not work in all browsers)
+    try {
+      Object.defineProperty(window, 'location', {
+        get: function() { return fakeLocation; },
+        set: function(url) { 
+          if (shouldProxy(url)) url = toProxyUrl(url);
+          __realLocation__.href = url;
+        },
+        configurable: false
+      });
+      console.log('[Proxy] window.location spoofed successfully');
+    } catch(e) {
+      // If we can't override window.location, try alternative methods
+      console.log('[Proxy] Could not override window.location: ' + e.message);
+    }
+    
+    // Also try to override self.location
+    try {
+      Object.defineProperty(self, 'location', {
+        get: function() { return fakeLocation; },
+        set: function(url) { 
+          if (shouldProxy(url)) url = toProxyUrl(url);
+          __realLocation__.href = url;
+        },
+        configurable: false
+      });
+    } catch(e) {}
+    
+    // Override location on document as well
+    try {
+      Object.defineProperty(document, 'location', {
+        get: function() { return fakeLocation; },
+        set: function(url) { 
+          if (shouldProxy(url)) url = toProxyUrl(url);
+          __realLocation__.href = url;
+        },
+        configurable: true
+      });
+    } catch(e) {}
   }
   
   // ═══════════════════════════════════════════════════════════
