@@ -662,8 +662,37 @@ function getFetchOverrideScript(originalUrl) {
   }
   
   // ═══════════════════════════════════════════════════════════
+  // HELPER: Validate if proxy URL is properly base64 encoded
+  // ═══════════════════════════════════════════════════════════
+  function isValidProxyUrl(url) {
+    try {
+      var urlObj = new URL(url);
+      var path = urlObj.pathname;
+      if (!path.startsWith('/p/')) return false;
+      var encoded = path.substring(3);
+      // Valid base64 encoded URLs are typically longer and use base64 chars
+      // Invalid ones like "video-calling-apps.html" are short and have dots/extensions
+      if (encoded.length < 10) return false;
+      // If it has a dot but no underscore, it's probably a file extension not base64
+      if (encoded.includes('.') && !encoded.includes('_') && !encoded.includes('-')) return false;
+      // Try to decode to verify it's valid base64
+      try {
+        var base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+        while (base64.length % 4) base64 += '=';
+        atob(base64); // Will throw if invalid
+        return true;
+      } catch(decodeErr) {
+        return false;
+      }
+    } catch(e) {
+      return false;
+    }
+  }
+  
+  // ═══════════════════════════════════════════════════════════
   // UNIVERSAL CLICK INTERCEPTION - INTERCEPT ALL EXTERNAL LINKS
   // Not just ad URLs, but ANY external URL click
+  // Also fixes invalid proxy URLs (like /p/video-calling-apps.html)
   // ═══════════════════════════════════════════════════════════
   function handleExternalClick(e) {
     // Find the clicked anchor element
@@ -676,16 +705,41 @@ function getFetchOverrideScript(originalUrl) {
     var href = link.href;
     if (!href) return;
     
-    // Already proxied - let it pass
-    if (href.includes('/p/')) return;
+    // Check if it's a same-origin URL with /p/ prefix
+    try {
+      var urlObj = new URL(href);
+      if (urlObj.origin === __realOrigin__ && href.includes('/p/')) {
+        // Check if it's a VALID proxy URL (properly base64 encoded)
+        if (isValidProxyUrl(href)) {
+          return; // Valid proxy URL, let it pass
+        }
+        // Invalid proxy URL (like /p/video-calling-apps.html) - try to fix it
+        var badPath = urlObj.pathname.substring(3); // Remove /p/
+        if (ORIGINAL_URL_OBJ) {
+          // Resolve relative URL against original URL
+          try {
+            var fixedUrl = new URL(badPath, ORIGINAL_URL_OBJ.href).href;
+            console.log('[Proxy] Fixing invalid proxy URL:', href, '->', fixedUrl);
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            __realLocation__.href = toProxyUrl(fixedUrl);
+            return false;
+          } catch(resolveErr) {
+            console.log('[Proxy] Could not fix invalid proxy URL:', badPath);
+          }
+        }
+        return; // Let it pass anyway if we can't fix it
+      }
+    } catch(urlErr) {}
     
     // Skip non-http URLs
     if (!href.startsWith('http://') && !href.startsWith('https://')) return;
     
-    // Skip same-origin URLs
+    // Skip same-origin URLs (that are not invalid proxy URLs)
     try {
-      var urlObj = new URL(href);
-      if (urlObj.origin === __realOrigin__) return;
+      var urlObj2 = new URL(href);
+      if (urlObj2.origin === __realOrigin__) return;
     } catch(err) {
       return;
     }

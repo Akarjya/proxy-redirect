@@ -17,24 +17,52 @@ const logger = require('../utils/logger');
 
 const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME || 'proxy_session';
 
-// Google ad domains that need HTML rewriting
-const GOOGLE_AD_DOMAINS = [
+// Google ad domains that need HTML rewriting with script injection
+// These domains serve ad iframes that need our interception scripts
+const GOOGLE_AD_HOSTNAMES = [
   'googleads.g.doubleclick.net',
   'pagead2.googlesyndication.com',
   'securepubads.g.doubleclick.net',
   'tpc.googlesyndication.com',
   'googleadservices.com',
   'www.googleadservices.com',
-  'partner.googleadservices.com'
+  'partner.googleadservices.com',
+  'adtrafficquality.google',
+  'ep1.adtrafficquality.google',
+  'ep2.adtrafficquality.google',
+  'googlesyndication.com',
+  'doubleclick.net'
+];
+
+// URLs (with path) that need script injection
+const GOOGLE_AD_URL_PATTERNS = [
+  '/recaptcha/api2/aframe',
+  '/recaptcha/enterprise/aframe',
+  '/pagead/'
 ];
 
 /**
- * Check if URL is from Google ad domain
+ * Check if URL is from Google ad domain or matches ad URL patterns
  */
 function isGoogleAdDomain(url) {
   try {
-    const hostname = new URL(url).hostname;
-    return GOOGLE_AD_DOMAINS.some(d => hostname.includes(d));
+    const urlObj = new URL(url);
+    const hostname = urlObj.hostname;
+    const pathname = urlObj.pathname;
+    
+    // Check hostname matches
+    const isAdHostname = GOOGLE_AD_HOSTNAMES.some(d => 
+      hostname === d || hostname.endsWith('.' + d)
+    );
+    
+    if (isAdHostname) return true;
+    
+    // Check URL path patterns
+    const isAdUrlPattern = GOOGLE_AD_URL_PATTERNS.some(pattern => 
+      pathname.includes(pattern)
+    );
+    
+    return isAdUrlPattern;
   } catch {
     return false;
   }

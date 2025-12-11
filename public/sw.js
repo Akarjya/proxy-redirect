@@ -192,7 +192,9 @@ self.addEventListener('fetch', (event) => {
     // CRITICAL: ALWAYS proxy iframe destinations
     // Google Ads creates iframes dynamically, and we MUST intercept them
     // destination === 'iframe' means this is an iframe src request
-    if (destination === 'iframe' || destination === '' && mode === 'no-cors') {
+    // destination === '' can also indicate iframe requests with various modes (cors, no-cors, same-origin)
+    // We check for multiple modes because iframes can use different CORS policies
+    if (destination === 'iframe' || (destination === '' && (mode === 'no-cors' || mode === 'cors' || mode === 'same-origin'))) {
       console.log('[SW V5] 🎯 IFRAME DETECTED - FORCING PROXY:', url.substring(0, 100));
       event.respondWith(handleExternalResource(event, url));
       return;
