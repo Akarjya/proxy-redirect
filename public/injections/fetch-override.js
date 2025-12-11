@@ -5,10 +5,88 @@
  * and converts external URLs to proxy URLs.
  * 
  * Handles: fetch(), XMLHttpRequest, Image.src, Script.src, etc.
+ * Also spoofs location/document.URL for Google Ads compatibility.
  */
 
 (function() {
   'use strict';
+  
+  // ═══════════════════════════════════════════════════════════════════════
+  // LOCATION SPOOFING FOR GOOGLE ADS
+  // ═══════════════════════════════════════════════════════════════════════
+  
+  /**
+   * Get original target URL from proxy path
+   */
+  function getOriginalUrl() {
+    const path = window.location.pathname;
+    if (path.startsWith('/p/')) {
+      try {
+        const encoded = path.substring(3);
+        // Base64 URL decode
+        let base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+        while (base64.length % 4) base64 += '=';
+        return decodeURIComponent(escape(atob(base64)));
+      } catch(e) {
+        return null;
+      }
+    }
+    return null;
+  }
+  
+  const ORIGINAL_URL = getOriginalUrl();
+  let ORIGINAL_URL_OBJ = null;
+  
+  if (ORIGINAL_URL) {
+    try {
+      ORIGINAL_URL_OBJ = new URL(ORIGINAL_URL);
+    } catch(e) {}
+  }
+  
+  // Spoof document.URL
+  if (ORIGINAL_URL) {
+    try {
+      Object.defineProperty(document, 'URL', {
+        get: function() { return ORIGINAL_URL; },
+        configurable: true
+      });
+    } catch(e) {}
+    
+    // Spoof document.documentURI
+    try {
+      Object.defineProperty(document, 'documentURI', {
+        get: function() { return ORIGINAL_URL; },
+        configurable: true
+      });
+    } catch(e) {}
+    
+    // Spoof document.baseURI
+    try {
+      Object.defineProperty(document, 'baseURI', {
+        get: function() { return ORIGINAL_URL; },
+        configurable: true
+      });
+    } catch(e) {}
+    
+    // Spoof document.domain
+    if (ORIGINAL_URL_OBJ) {
+      try {
+        Object.defineProperty(document, 'domain', {
+          get: function() { return ORIGINAL_URL_OBJ.hostname; },
+          set: function() {},
+          configurable: true
+        });
+      } catch(e) {}
+    }
+    
+    // Spoof document.referrer
+    try {
+      Object.defineProperty(document, 'referrer', {
+        get: function() { return ORIGINAL_URL_OBJ ? ORIGINAL_URL_OBJ.origin + '/' : ''; },
+        configurable: true
+      });
+    } catch(e) {}
+  }
   
   // ═══════════════════════════════════════════════════════════════════════
   // UTILITY FUNCTIONS
@@ -160,21 +238,33 @@
   // LOCATION OVERRIDES
   // ═══════════════════════════════════════════════════════════════════════
   
-  const originalAssign = location.assign.bind(location);
-  location.assign = function(url) {
-    if (shouldProxy(url)) {
-      url = toProxyUrl(url);
-    }
-    return originalAssign(url);
-  };
+  try {
+    const originalAssign = location.assign.bind(location);
+    Object.defineProperty(location, 'assign', {
+      value: function(url) {
+        if (shouldProxy(url)) {
+          url = toProxyUrl(url);
+        }
+        return originalAssign(url);
+      },
+      writable: false,
+      configurable: false
+    });
+  } catch(e) {}
   
-  const originalReplace = location.replace.bind(location);
-  location.replace = function(url) {
-    if (shouldProxy(url)) {
-      url = toProxyUrl(url);
-    }
-    return originalReplace(url);
-  };
+  try {
+    const originalReplace = location.replace.bind(location);
+    Object.defineProperty(location, 'replace', {
+      value: function(url) {
+        if (shouldProxy(url)) {
+          url = toProxyUrl(url);
+        }
+        return originalReplace(url);
+      },
+      writable: false,
+      configurable: false
+    });
+  } catch(e) {}
   
   // ═══════════════════════════════════════════════════════════════════════
   // WINDOW.OPEN OVERRIDE
