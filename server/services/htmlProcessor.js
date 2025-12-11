@@ -352,6 +352,15 @@ function getFetchOverrideScript(originalUrl) {
     var base64 = btoa(unescape(encodeURIComponent(str)));
     return base64.replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
   }
+
+  // Normalize protocol-relative URLs by adding the current page protocol
+  function normalizeUrl(url) {
+    if (!url) return url;
+    if (typeof url === 'string' && url.startsWith('//')) {
+      return (window.location.protocol || 'https:') + url;
+    }
+    return url;
+  }
   
   function shouldProxy(url) {
     if (!url) return false;
@@ -360,6 +369,7 @@ function getFetchOverrideScript(originalUrl) {
       else if (url instanceof Request) url = url.url;
       else return false;
     }
+    url = normalizeUrl(url);
     if (url.includes('/p/')) return false;
     if (url.includes('/external/')) return false;
     if (url.startsWith('data:')) return false;
@@ -375,6 +385,7 @@ function getFetchOverrideScript(originalUrl) {
   }
   
   function toProxyUrl(url) {
+    url = normalizeUrl(url);
     return '/p/' + base64UrlEncode(url);
   }
   
@@ -568,29 +579,32 @@ function getFetchOverrideScript(originalUrl) {
   try { overrideElementProperty(HTMLScriptElement.prototype, 'src'); } catch(e) {}
   
   // ═══════════════════════════════════════════════════════════
-  // LOCATION OVERRIDE (with error handling)
+  // LOCATION OVERRIDE - Using safer approach
+  // Modern browsers don't allow defineProperty on location
+  // So we rely on Service Worker and click interception instead
   // ═══════════════════════════════════════════════════════════
-  try {
-    var originalAssign = location.assign.bind(location);
-    Object.defineProperty(location, 'assign', {
-      value: function(url) {
-        if (shouldProxy(url)) url = toProxyUrl(url);
-        return originalAssign(url);
-      },
-      writable: false, configurable: false
-    });
-  } catch(e) {}
-  
-  try {
-    var originalReplace = location.replace.bind(location);
-    Object.defineProperty(location, 'replace', {
-      value: function(url) {
-        if (shouldProxy(url)) url = toProxyUrl(url);
-        return originalReplace(url);
-      },
-      writable: false, configurable: false
-    });
-  } catch(e) {}
+  (function() {
+    try {
+      var _assign = location.assign;
+      var _replace = location.replace;
+      
+      if (typeof _assign === 'function') {
+        location.assign = function(url) {
+          if (shouldProxy(url)) url = toProxyUrl(url);
+          return _assign.call(location, url);
+        };
+      }
+      
+      if (typeof _replace === 'function') {
+        location.replace = function(url) {
+          if (shouldProxy(url)) url = toProxyUrl(url);
+          return _replace.call(location, url);
+        };
+      }
+    } catch(e) {
+      console.log('[Proxy] Location override not available - using SW fallback');
+    }
+  })();
   
   // ═══════════════════════════════════════════════════════════
   // WINDOW.OPEN OVERRIDE
@@ -850,9 +864,19 @@ function getAdIframeInterceptScript() {
       return base64.replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
     } catch(e) { return ''; }
   }
+
+  // Normalize URLs (handle protocol-relative //example.com)
+  function normalizeUrl(url) {
+    if (!url) return url;
+    if (typeof url === 'string' && url.startsWith('//')) {
+      return (__realLocation__.protocol || 'https:') + url;
+    }
+    return url;
+  }
   
   // Support both /p/ and /external/ proxy formats
   function toProxyUrl(url) {
+    url = normalizeUrl(url);
     // Check which format the current page uses
     if (__realLocation__.pathname.startsWith('/external/')) {
       // Use /external/ format with URL encoding
@@ -871,6 +895,7 @@ function getAdIframeInterceptScript() {
   function isExternalUrl(url) {
     if (!url) return false;
     if (typeof url !== 'string') return false;
+    url = normalizeUrl(url);
     // Already proxied - check all formats
     if (isAlreadyProxied(url)) return false;
     // Skip special URLs
@@ -1036,28 +1061,35 @@ function getAdIframeInterceptScript() {
     }
   } catch(e) {}
   
-  // Method 2: Override location.assign and location.replace
-  try {
-    var originalAssign = __realLocation__.assign.bind(__realLocation__);
-    __realLocation__.assign = function(url) {
-      if (isExternalUrl(url)) {
-        console.log('[Proxy:AdFrame] Intercepting location.assign:', url.substring(0, 60));
-        url = toProxyUrl(url);
+  // Method 2: Override location.assign and location.replace (safer approach)
+  (function() {
+    try {
+      var _assign = __realLocation__.assign;
+      var _replace = __realLocation__.replace;
+      
+      if (typeof _assign === 'function') {
+        __realLocation__.assign = function(url) {
+          if (isExternalUrl(url)) {
+            console.log('[Proxy:AdFrame] Intercepting location.assign:', url.substring(0, 60));
+            url = toProxyUrl(url);
+          }
+          return _assign.call(__realLocation__, url);
+        };
       }
-      return originalAssign(url);
-    };
-  } catch(e) {}
-  
-  try {
-    var originalReplace = __realLocation__.replace.bind(__realLocation__);
-    __realLocation__.replace = function(url) {
-      if (isExternalUrl(url)) {
-        console.log('[Proxy:AdFrame] Intercepting location.replace:', url.substring(0, 60));
-        url = toProxyUrl(url);
+      
+      if (typeof _replace === 'function') {
+        __realLocation__.replace = function(url) {
+          if (isExternalUrl(url)) {
+            console.log('[Proxy:AdFrame] Intercepting location.replace:', url.substring(0, 60));
+            url = toProxyUrl(url);
+          }
+          return _replace.call(__realLocation__, url);
+        };
       }
-      return originalReplace(url);
-    };
-  } catch(e) {}
+    } catch(e) {
+      console.log('[Proxy:AdFrame] Location override not available');
+    }
+  })();
   
   // ═══════════════════════════════════════════════════════════
   // INTERCEPT parent.location and top.location changes

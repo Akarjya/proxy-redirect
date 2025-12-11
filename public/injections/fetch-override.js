@@ -114,6 +114,17 @@
     const base64 = btoa(unescape(encodeURIComponent(str)));
     return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
+
+  /**
+   * Normalize URL so protocol-relative values get a scheme
+   */
+  function normalizeUrl(url) {
+    if (!url) return url;
+    if (typeof url === 'string' && url.startsWith('//')) {
+      return (window.location.protocol || 'https:') + url;
+    }
+    return url;
+  }
   
   /**
    * Check if URL should be proxied
@@ -128,6 +139,9 @@
       else if (url instanceof Request) url = url.url;
       else return false;
     }
+    
+    // Normalize protocol-relative URLs
+    url = normalizeUrl(url);
     
     // Skip already proxied URLs - check ALL proxy formats
     if (url.includes('/p/')) return false;
@@ -160,6 +174,7 @@
    * Convert URL to proxy URL
    */
   function toProxyUrl(url) {
+    url = normalizeUrl(url);
     return '/p/' + base64UrlEncode(url);
   }
   
@@ -254,38 +269,43 @@
   } catch(e) {}
   
   // ═══════════════════════════════════════════════════════════════════════
-  // LOCATION OVERRIDES
+  // LOCATION OVERRIDES - Using safer approach that doesn't throw errors
+  // Modern browsers don't allow overriding location properties
+  // So we rely on Service Worker and click interception instead
   // ═══════════════════════════════════════════════════════════════════════
   
-  try {
-    const originalAssign = location.assign.bind(location);
-    Object.defineProperty(location, 'assign', {
-      value: function(url) {
-        if (shouldProxy(url)) {
-          console.log('[Proxy] Intercepting location.assign:', url.substring(0, 60));
-          url = toProxyUrl(url);
-        }
-        return originalAssign(url);
-      },
-      writable: false,
-      configurable: false
-    });
-  } catch(e) {}
-  
-  try {
-    const originalReplace = location.replace.bind(location);
-    Object.defineProperty(location, 'replace', {
-      value: function(url) {
-        if (shouldProxy(url)) {
-          console.log('[Proxy] Intercepting location.replace:', url.substring(0, 60));
-          url = toProxyUrl(url);
-        }
-        return originalReplace(url);
-      },
-      writable: false,
-      configurable: false
-    });
-  } catch(e) {}
+  // Try to wrap location methods (may silently fail in some browsers)
+  (function() {
+    try {
+      // Store original methods
+      const _assign = location.assign;
+      const _replace = location.replace;
+      
+      // Try to override (will silently fail if not allowed)
+      if (typeof _assign === 'function') {
+        location.assign = function(url) {
+          if (shouldProxy(url)) {
+            console.log('[Proxy] Intercepting location.assign:', url.substring(0, 60));
+            url = toProxyUrl(url);
+          }
+          return _assign.call(location, url);
+        };
+      }
+      
+      if (typeof _replace === 'function') {
+        location.replace = function(url) {
+          if (shouldProxy(url)) {
+            console.log('[Proxy] Intercepting location.replace:', url.substring(0, 60));
+            url = toProxyUrl(url);
+          }
+          return _replace.call(location, url);
+        };
+      }
+    } catch(e) {
+      // Silently ignore - Service Worker will handle navigation interception
+      console.log('[Proxy] Location override not available - using SW fallback');
+    }
+  })();
   
   // ═══════════════════════════════════════════════════════════════════════
   // HISTORY API INTERCEPTION (for SPA-style navigations)

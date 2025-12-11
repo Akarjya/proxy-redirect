@@ -8,7 +8,8 @@
  */
 
 // Cache name for any cached assets
-const CACHE_NAME = 'proxy-poc-v2';
+// V3: Fixed iframe handling - proxy instead of redirect
+const CACHE_NAME = 'proxy-poc-v3';
 
 /**
  * Install event - Called when SW is first installed
@@ -77,6 +78,19 @@ function base64UrlDecode(encoded) {
 }
 
 /**
+ * Normalize external URLs so protocol-relative values (//example.com) are handled
+ * @param {string} url
+ * @returns {string}
+ */
+function normalizeExternalUrl(url) {
+  if (!url) return url;
+  if (typeof url === 'string' && url.startsWith('//')) {
+    return (self.location?.protocol || 'https:') + url;
+  }
+  return url;
+}
+
+/**
  * Check if request should be proxied
  * V2: Handles both /p/ and /external/ formats
  */
@@ -107,7 +121,8 @@ function isStaticAsset(url) {
  */
 function isExternalUrl(url) {
   try {
-    const urlObj = new URL(url);
+    const normalized = normalizeExternalUrl(url);
+    const urlObj = new URL(normalized);
     // External if different origin from our service worker
     return urlObj.origin !== self.location.origin;
   } catch (e) {
@@ -119,14 +134,15 @@ function isExternalUrl(url) {
  * Convert external URL to proxy URL
  */
 function externalToProxyUrl(url) {
-  const encoded = base64UrlEncode(url);
+  const normalized = normalizeExternalUrl(url);
+  const encoded = base64UrlEncode(normalized);
   return new URL('/p/' + encoded, self.location.origin).toString();
 }
 
 /**
  * Fetch event - Intercepts all network requests
- * Enhanced to also catch external navigation attempts
- * V2: Improved to catch ALL external URLs regardless of request mode
+ * V3: Fixed to properly handle iframe requests - proxy them instead of redirect
+ * CRITICAL: Iframes should NOT be redirected, they should be proxied directly
  */
 self.addEventListener('fetch', (event) => {
   const request = event.request;
@@ -148,50 +164,68 @@ self.addEventListener('fetch', (event) => {
   }
   
   // ═══════════════════════════════════════════════════════════
-  // CRITICAL FIX: Intercept ALL external URL requests
-  // Not just 'navigate' mode - also catch 'no-cors' and other modes
-  // This catches ad clicks that use top.location.href
+  // CRITICAL FIX V3: Handle all external URLs appropriately
+  // - Document navigations: redirect to proxy URL
+  // - Iframes: fetch through proxy (NOT redirect - this breaks iframes!)
+  // - Other resources: fetch through proxy
   // ═══════════════════════════════════════════════════════════
   if (isExternalUrl(url)) {
-    // Check if this is any kind of navigation or iframe load
-    const isNavigation = request.mode === 'navigate' || 
-                        request.destination === 'document' ||
-                        request.destination === 'iframe' ||  // iframe embeds
-                        request.destination === '' ||  // Some navigations have empty destination
-                        request.redirect === 'follow';
     
-    // Check for Google ad click URLs specifically
+    // Check for Google ad click URLs specifically (these are navigation clicks)
     const isAdClickUrl = url.includes('googleadservices.com/pagead/aclk') ||
                         url.includes('googleads.g.doubleclick.net/dbm/clk') ||
-                        url.includes('googleads.g.doubleclick.net/pagead/ads') ||  // Ad iframe content
                         url.includes('doubleclick.net/pcs/click') ||
                         url.includes('/pagead/aclk');
     
-    // Check for Google Ad domains that should be proxied for HTML content
+    // Check for Google Ad domains (iframe content and resources)
     const isGoogleAdDomain = url.includes('googleads.g.doubleclick.net') ||
                             url.includes('pagead2.googlesyndication.com') ||
                             url.includes('tpc.googlesyndication.com') ||
-                            url.includes('securepubads.g.doubleclick.net');
+                            url.includes('securepubads.g.doubleclick.net') ||
+                            url.includes('adtrafficquality.google') ||
+                            url.includes('googlesyndication.com');
     
-    if (isNavigation || isAdClickUrl) {
-      console.log('[SW] INTERCEPTING EXTERNAL NAVIGATION:', url.substring(0, 80));
-      console.log('[SW] Request details - mode:', request.mode, 'destination:', request.destination);
-      
-      // Redirect to proxy URL
+    // Determine request type
+    const isDocumentNavigation = request.mode === 'navigate' && request.destination === 'document';
+    const isIframeRequest = request.destination === 'iframe';
+    
+    // ═══════════════════════════════════════════════════════════
+    // CASE 1: Top-level document navigation (user clicking links)
+    // Use redirect so URL bar updates correctly
+    // ═══════════════════════════════════════════════════════════
+    if (isDocumentNavigation || isAdClickUrl) {
+      console.log('[SW] REDIRECTING TOP-LEVEL NAVIGATION:', url.substring(0, 80));
       const proxyUrl = externalToProxyUrl(url);
       event.respondWith(Response.redirect(proxyUrl, 302));
       return;
     }
     
-    // For Google Ad domains, proxy the request to maintain context
-    if (isGoogleAdDomain) {
-      console.log('[SW] Intercepting Google Ad domain request:', url.substring(0, 60));
+    // ═══════════════════════════════════════════════════════════
+    // CASE 2: Iframe requests - MUST proxy content, NOT redirect!
+    // Redirecting iframes breaks them. We need to fetch content
+    // through proxy and return it so our scripts get injected.
+    // ═══════════════════════════════════════════════════════════
+    if (isIframeRequest) {
+      console.log('[SW] PROXYING IFRAME REQUEST:', url.substring(0, 80));
       event.respondWith(handleExternalResource(event, url));
       return;
     }
     
-    // For non-navigation external requests (images, scripts, etc.)
-    console.log('[SW] Intercepting external resource:', url.substring(0, 60));
+    // ═══════════════════════════════════════════════════════════
+    // CASE 3: Google Ad domain resources (scripts, images, etc.)
+    // Proxy to maintain session and inject our scripts
+    // ═══════════════════════════════════════════════════════════
+    if (isGoogleAdDomain) {
+      console.log('[SW] PROXYING GOOGLE AD RESOURCE:', url.substring(0, 60));
+      event.respondWith(handleExternalResource(event, url));
+      return;
+    }
+    
+    // ═══════════════════════════════════════════════════════════
+    // CASE 4: All other external resources (images, scripts, etc.)
+    // Proxy to maintain anonymity
+    // ═══════════════════════════════════════════════════════════
+    console.log('[SW] PROXYING EXTERNAL RESOURCE:', url.substring(0, 60));
     event.respondWith(handleExternalResource(event, url));
     return;
   }
@@ -206,7 +240,8 @@ self.addEventListener('fetch', (event) => {
 async function handleExternalResource(event, url) {
   try {
     // Convert to proxy URL and fetch
-    const encoded = base64UrlEncode(url);
+    const normalizedUrl = normalizeExternalUrl(url);
+    const encoded = base64UrlEncode(normalizedUrl);
     const proxyApiUrl = new URL('/api/proxy', self.location.origin);
     proxyApiUrl.searchParams.set('url', encoded);
     
