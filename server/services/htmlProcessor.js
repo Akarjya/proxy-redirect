@@ -75,17 +75,33 @@ function resolveUrl(url, baseUrl) {
 
 /**
  * Convert URL to proxy URL
- * @param {string} absoluteUrl - Absolute URL
+ * @param {string} absoluteUrl - Absolute URL (or relative URL if baseUrl provided)
+ * @param {string} [baseUrl] - Optional base URL for resolving relative URLs
  * @returns {string}
  */
-function toProxyUrl(absoluteUrl) {
+function toProxyUrl(absoluteUrl, baseUrl) {
   if (!absoluteUrl || shouldSkipUrl(absoluteUrl)) {
     return absoluteUrl;
   }
   
-  // Only proxy http/https URLs
+  // If URL is relative (doesn't start with http), try to resolve it
   if (!absoluteUrl.startsWith('http://') && !absoluteUrl.startsWith('https://')) {
-    return absoluteUrl;
+    if (baseUrl) {
+      try {
+        // Resolve relative URL against base URL
+        absoluteUrl = new URL(absoluteUrl, baseUrl).href;
+      } catch (e) {
+        // If resolution fails and no absolute URL, return original
+        // This will make browser resolve it against current page (which may be wrong)
+        // But we can't do much more without a valid base URL
+        console.warn('[htmlProcessor] Failed to resolve relative URL:', absoluteUrl);
+        return absoluteUrl;
+      }
+    } else {
+      // No base URL provided and URL is relative - can't encode properly
+      console.warn('[htmlProcessor] Relative URL without baseUrl:', absoluteUrl);
+      return absoluteUrl;
+    }
   }
   
   return base64Url.toProxyPath(absoluteUrl);
@@ -106,7 +122,8 @@ function rewriteSrcset(srcset, baseUrl) {
     if (parts.length >= 1) {
       const url = parts[0];
       const resolved = resolveUrl(url, baseUrl);
-      const proxied = toProxyUrl(resolved);
+      // Pass baseUrl as fallback in case resolved is still relative
+      const proxied = toProxyUrl(resolved, baseUrl);
       parts[0] = proxied;
     }
     return parts.join(' ');
@@ -433,16 +450,21 @@ function getFetchOverrideScript(originalUrl) {
   }
   
   function rewriteAdUrl(adUrl) {
-    if (!ORIGINAL_URL || !isAdUrl(adUrl)) return adUrl;
+    if (!isAdUrl(adUrl)) return adUrl;
     try {
       var urlObj = new URL(adUrl);
-      var urlParam = urlObj.searchParams.get('url');
-      if (urlParam && (urlParam.includes('/p/') || urlParam.includes(window.location.origin))) {
-        urlObj.searchParams.set('url', ORIGINAL_URL);
-        return urlObj.toString();
+      // If we have ORIGINAL_URL, rewrite the 'url' parameter to show original page
+      if (ORIGINAL_URL) {
+        var urlParam = urlObj.searchParams.get('url');
+        if (urlParam && (urlParam.includes('/p/') || urlParam.includes(window.location.origin))) {
+          urlObj.searchParams.set('url', ORIGINAL_URL);
+        }
       }
+      // CRITICAL: Convert ad URL to proxy URL so it loads through our server
+      return toProxyUrl(urlObj.toString());
     } catch(e) {}
-    return adUrl;
+    // Fallback: still proxy the ad URL even if modification fails
+    return toProxyUrl(adUrl);
   }
   
   // ═══════════════════════════════════════════════════════════
@@ -482,22 +504,32 @@ function getFetchOverrideScript(originalUrl) {
       Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
         get: iframeDescriptor.get,
         set: function(value) {
-          if (value && isAdUrl(value)) value = rewriteAdUrl(value);
-          else if (shouldProxy(value)) value = toProxyUrl(value);
+          if (value && isAdUrl(value)) {
+            console.log('[Proxy] Intercepting ad iframe src:', value.substring(0, 60));
+            value = rewriteAdUrl(value);
+          } else if (shouldProxy(value)) {
+            console.log('[Proxy] Proxying external iframe src:', value.substring(0, 60));
+            value = toProxyUrl(value);
+          }
           return originalIframeSrcSetter.call(this, value);
         },
         configurable: true,
         enumerable: iframeDescriptor.enumerable
       });
     }
-  } catch(e) {}
+  } catch(e) { console.log('[Proxy] Could not override iframe src:', e.message); }
   
   // Override setAttribute for iframes
   var originalSetAttribute = Element.prototype.setAttribute;
   Element.prototype.setAttribute = function(name, value) {
     if (this.tagName === 'IFRAME' && name.toLowerCase() === 'src') {
-      if (value && isAdUrl(value)) value = rewriteAdUrl(value);
-      else if (shouldProxy(value)) value = toProxyUrl(value);
+      if (value && isAdUrl(value)) {
+        console.log('[Proxy] setAttribute: Rewriting ad iframe src');
+        value = rewriteAdUrl(value);
+      } else if (shouldProxy(value)) {
+        console.log('[Proxy] setAttribute: Proxying external iframe src');
+        value = toProxyUrl(value);
+      }
     }
     return originalSetAttribute.call(this, name, value);
   };
@@ -729,7 +761,8 @@ function processHtml(html, pageUrl, options = {}) {
         } else {
           // Regular URL attribute
           const resolved = resolveUrl(value, baseUrl);
-          const proxied = toProxyUrl(resolved);
+          // Pass baseUrl as fallback in case resolved is still relative
+          const proxied = toProxyUrl(resolved, baseUrl);
           $elem.attr(attr, proxied);
         }
       }
@@ -1153,7 +1186,8 @@ function processGoogleAdHtml(html, pageUrl) {
           $elem.attr(attr, rewriteSrcset(value, baseUrl));
         } else {
           const resolved = resolveUrl(value, baseUrl);
-          const proxied = toProxyUrl(resolved);
+          // Pass baseUrl as fallback in case resolved is still relative
+          const proxied = toProxyUrl(resolved, baseUrl);
           $elem.attr(attr, proxied);
         }
       }

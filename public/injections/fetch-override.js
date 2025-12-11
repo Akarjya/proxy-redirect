@@ -370,37 +370,40 @@
   }
   
   /**
-   * Rewrite Google Ad URL to use original page URL
-   * Changes the 'url' parameter from proxy URL to original target URL
+   * Rewrite Google Ad URL to use original page URL AND proxy it
+   * 1. Changes the 'url' parameter from proxy URL to original target URL
+   * 2. Converts the entire ad URL to a proxy URL so it loads through our server
    */
   function rewriteAdUrl(adUrl) {
-    if (!ORIGINAL_URL || !isAdUrl(adUrl)) return adUrl;
+    if (!isAdUrl(adUrl)) return adUrl;
     
     try {
       const urlObj = new URL(adUrl);
-      const urlParam = urlObj.searchParams.get('url');
       
-      // If the url param contains our proxy URL, replace with original
-      if (urlParam && urlParam.includes('/p/')) {
-        urlObj.searchParams.set('url', ORIGINAL_URL);
-        return urlObj.toString();
+      // If we have ORIGINAL_URL, rewrite the 'url' parameter
+      if (ORIGINAL_URL) {
+        const urlParam = urlObj.searchParams.get('url');
+        
+        // If the url param contains our proxy URL, replace with original
+        if (urlParam && (urlParam.includes('/p/') || urlParam.includes(window.location.origin))) {
+          urlObj.searchParams.set('url', ORIGINAL_URL);
+        }
       }
       
-      // If url param is our proxy origin, replace with original
-      if (urlParam && urlParam.includes(window.location.origin)) {
-        urlObj.searchParams.set('url', ORIGINAL_URL);
-        return urlObj.toString();
-      }
+      // CRITICAL: Convert the ad URL to proxy URL so it loads through our server
+      // This ensures the ad iframe content goes through our proxy
+      return toProxyUrl(urlObj.toString());
     } catch(e) {}
     
-    return adUrl;
+    // Fallback: still proxy the ad URL even if modification fails
+    return toProxyUrl(adUrl);
   }
   
   // ═══════════════════════════════════════════════════════════════════════
   // IFRAME AD URL INTERCEPTION
   // ═══════════════════════════════════════════════════════════════════════
   
-  // Override iframe src setter to rewrite Google Ad URLs
+  // Override iframe src setter to proxy ALL external URLs including Google Ads
   try {
     const iframeDescriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
     if (iframeDescriptor && iframeDescriptor.set) {
@@ -409,10 +412,13 @@
       Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
         get: iframeDescriptor.get,
         set: function(value) {
-          // Rewrite Google Ad URLs to use original page URL
+          // CRITICAL: Proxy ALL external iframes, including Google Ads
+          // Google Ad URLs get special treatment (rewrite 'url' param + proxy)
           if (value && isAdUrl(value)) {
+            console.log('[Proxy] Intercepting ad iframe src:', value.substring(0, 60));
             value = rewriteAdUrl(value);
           } else if (shouldProxy(value)) {
+            console.log('[Proxy] Intercepting external iframe src:', value.substring(0, 60));
             value = toProxyUrl(value);
           }
           return originalIframeSrcSetter.call(this, value);
@@ -421,15 +427,19 @@
         enumerable: iframeDescriptor.enumerable
       });
     }
-  } catch(e) {}
+  } catch(e) {
+    console.log('[Proxy] Could not override iframe src:', e.message);
+  }
   
   // Also intercept setAttribute for iframes
   const originalSetAttribute = Element.prototype.setAttribute;
   Element.prototype.setAttribute = function(name, value) {
     if (this.tagName === 'IFRAME' && name.toLowerCase() === 'src') {
       if (value && isAdUrl(value)) {
+        console.log('[Proxy] setAttribute: Rewriting ad iframe src');
         value = rewriteAdUrl(value);
       } else if (shouldProxy(value)) {
+        console.log('[Proxy] setAttribute: Proxying external iframe src');
         value = toProxyUrl(value);
       }
     }
@@ -441,11 +451,17 @@
     mutations.forEach(function(mutation) {
       mutation.addedNodes.forEach(function(node) {
         if (node.tagName === 'IFRAME' && node.src) {
+          // Check if it's an ad URL or any external URL that needs proxying
           if (isAdUrl(node.src)) {
             const newSrc = rewriteAdUrl(node.src);
             if (newSrc !== node.src) {
+              console.log('[Proxy] MutationObserver: Rewriting ad iframe src');
               node.src = newSrc;
             }
+          } else if (shouldProxy(node.src)) {
+            const newSrc = toProxyUrl(node.src);
+            console.log('[Proxy] MutationObserver: Proxying external iframe src');
+            node.src = newSrc;
           }
         }
       });

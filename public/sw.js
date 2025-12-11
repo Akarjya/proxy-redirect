@@ -153,17 +153,25 @@ self.addEventListener('fetch', (event) => {
   // This catches ad clicks that use top.location.href
   // ═══════════════════════════════════════════════════════════
   if (isExternalUrl(url)) {
-    // Check if this is any kind of navigation
+    // Check if this is any kind of navigation or iframe load
     const isNavigation = request.mode === 'navigate' || 
                         request.destination === 'document' ||
+                        request.destination === 'iframe' ||  // iframe embeds
                         request.destination === '' ||  // Some navigations have empty destination
                         request.redirect === 'follow';
     
     // Check for Google ad click URLs specifically
     const isAdClickUrl = url.includes('googleadservices.com/pagead/aclk') ||
                         url.includes('googleads.g.doubleclick.net/dbm/clk') ||
+                        url.includes('googleads.g.doubleclick.net/pagead/ads') ||  // Ad iframe content
                         url.includes('doubleclick.net/pcs/click') ||
                         url.includes('/pagead/aclk');
+    
+    // Check for Google Ad domains that should be proxied for HTML content
+    const isGoogleAdDomain = url.includes('googleads.g.doubleclick.net') ||
+                            url.includes('pagead2.googlesyndication.com') ||
+                            url.includes('tpc.googlesyndication.com') ||
+                            url.includes('securepubads.g.doubleclick.net');
     
     if (isNavigation || isAdClickUrl) {
       console.log('[SW] INTERCEPTING EXTERNAL NAVIGATION:', url.substring(0, 80));
@@ -172,6 +180,13 @@ self.addEventListener('fetch', (event) => {
       // Redirect to proxy URL
       const proxyUrl = externalToProxyUrl(url);
       event.respondWith(Response.redirect(proxyUrl, 302));
+      return;
+    }
+    
+    // For Google Ad domains, proxy the request to maintain context
+    if (isGoogleAdDomain) {
+      console.log('[SW] Intercepting Google Ad domain request:', url.substring(0, 60));
+      event.respondWith(handleExternalResource(event, url));
       return;
     }
     
