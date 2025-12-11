@@ -55,6 +55,9 @@ function shouldSkipUrl(url) {
 function resolveUrl(url, baseUrl) {
   if (!url || shouldSkipUrl(url)) return url;
   
+  // Trim whitespace
+  url = url.trim();
+  
   try {
     // Handle protocol-relative URLs
     if (url.startsWith('//')) {
@@ -66,9 +69,17 @@ function resolveUrl(url, baseUrl) {
       return url;
     }
     
+    // Ensure baseUrl is valid for resolution
+    if (!baseUrl || !baseUrl.startsWith('http')) {
+      console.warn('[htmlProcessor] Invalid baseUrl for resolution:', baseUrl, 'url:', url);
+      return url;
+    }
+    
     // Resolve relative URL
-    return new URL(url, baseUrl).href;
+    const resolved = new URL(url, baseUrl).href;
+    return resolved;
   } catch (e) {
+    console.warn('[htmlProcessor] URL resolution failed:', url, 'baseUrl:', baseUrl, 'error:', e.message);
     return url;
   }
 }
@@ -84,22 +95,24 @@ function toProxyUrl(absoluteUrl, baseUrl) {
     return absoluteUrl;
   }
   
+  // Trim whitespace
+  absoluteUrl = absoluteUrl.trim();
+  
   // If URL is relative (doesn't start with http), try to resolve it
   if (!absoluteUrl.startsWith('http://') && !absoluteUrl.startsWith('https://')) {
-    if (baseUrl) {
+    if (baseUrl && baseUrl.startsWith('http')) {
       try {
         // Resolve relative URL against base URL
         absoluteUrl = new URL(absoluteUrl, baseUrl).href;
       } catch (e) {
         // If resolution fails and no absolute URL, return original
         // This will make browser resolve it against current page (which may be wrong)
-        // But we can't do much more without a valid base URL
-        console.warn('[htmlProcessor] Failed to resolve relative URL:', absoluteUrl);
+        console.warn('[htmlProcessor] Failed to resolve relative URL:', absoluteUrl, 'baseUrl:', baseUrl);
         return absoluteUrl;
       }
     } else {
-      // No base URL provided and URL is relative - can't encode properly
-      console.warn('[htmlProcessor] Relative URL without baseUrl:', absoluteUrl);
+      // No valid base URL provided and URL is relative - can't encode properly
+      console.warn('[htmlProcessor] Relative URL without valid baseUrl:', absoluteUrl, 'baseUrl:', baseUrl);
       return absoluteUrl;
     }
   }
@@ -712,13 +725,23 @@ function processHtml(html, pageUrl, options = {}) {
     xmlMode: false
   });
   
+  // Ensure pageUrl is valid
+  if (!pageUrl || !pageUrl.startsWith('http')) {
+    console.warn('[htmlProcessor] Invalid pageUrl:', pageUrl);
+    return $.html();
+  }
+  
   // Get base URL (check for <base> tag)
   let baseUrl = pageUrl;
   const baseTag = $('base[href]');
   if (baseTag.length > 0) {
     const baseHref = baseTag.attr('href');
-    if (baseHref) {
-      baseUrl = resolveUrl(baseHref, pageUrl);
+    if (baseHref && baseHref.trim()) {
+      const resolvedBase = resolveUrl(baseHref.trim(), pageUrl);
+      // Only use resolved base if it's a valid absolute URL
+      if (resolvedBase && resolvedBase.startsWith('http')) {
+        baseUrl = resolvedBase;
+      }
     }
   }
   
@@ -1129,6 +1152,12 @@ function processGoogleAdHtml(html, pageUrl) {
     decodeEntities: false,
     xmlMode: false
   });
+  
+  // Ensure pageUrl is valid
+  if (!pageUrl || !pageUrl.startsWith('http')) {
+    console.warn('[htmlProcessor] Invalid pageUrl for Google Ad HTML:', pageUrl);
+    return $.html();
+  }
   
   // Use page URL as base
   const baseUrl = pageUrl;
