@@ -330,6 +330,68 @@ function getFetchOverrideScript(originalUrl) {
 (function() {
   'use strict';
   
+  // Store real location FIRST before anything else
+  var __realLocation__ = window.location;
+  var __realOrigin__ = __realLocation__.origin;
+  
+  // ═══════════════════════════════════════════════════════════
+  // CRITICAL: DOCUMENT.WRITE OVERRIDE - MUST BE FIRST!
+  // Google Ads uses document.write to inject iframe content synchronously
+  // ═══════════════════════════════════════════════════════════
+  (function() {
+    var originalWrite = document.write.bind(document);
+    var originalWriteln = document.writeln.bind(document);
+    
+    function quickBase64Encode(str) {
+      try {
+        var base64 = btoa(unescape(encodeURIComponent(str)));
+        return base64.replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/g, '');
+      } catch(e) { return null; }
+    }
+    
+    function isExternalUrl(url) {
+      if (!url) return false;
+      if (url.startsWith('//')) url = 'https:' + url;
+      if (!url.startsWith('http://') && !url.startsWith('https://')) return false;
+      try {
+        return new URL(url).origin !== __realOrigin__;
+      } catch(e) { return false; }
+    }
+    
+    function rewriteHtmlContent(html) {
+      if (!html || typeof html !== 'string') return html;
+      // Rewrite iframe src
+      html = html.replace(/(<iframe[^>]*\\s+src\\s*=\\s*["'])([^"']+)(["'])/gi, function(m, p, url, s) {
+        if (url.startsWith('//')) url = 'https:' + url;
+        if (isExternalUrl(url) && !url.includes('/p/')) {
+          var enc = quickBase64Encode(url);
+          if (enc) { console.log('[Proxy] document.write: iframe proxied'); return p + '/p/' + enc + s; }
+        }
+        return m;
+      });
+      // Rewrite script src
+      html = html.replace(/(<script[^>]*\\s+src\\s*=\\s*["'])([^"']+)(["'])/gi, function(m, p, url, s) {
+        if (url.startsWith('//')) url = 'https:' + url;
+        if (isExternalUrl(url) && !url.includes('/p/')) {
+          var enc = quickBase64Encode(url);
+          if (enc) return p + '/p/' + enc + s;
+        }
+        return m;
+      });
+      return html;
+    }
+    
+    document.write = function() {
+      var args = Array.prototype.slice.call(arguments);
+      return originalWrite.apply(document, args.map(rewriteHtmlContent));
+    };
+    document.writeln = function() {
+      var args = Array.prototype.slice.call(arguments);
+      return originalWriteln.apply(document, args.map(rewriteHtmlContent));
+    };
+    console.log('[Proxy] document.write/writeln OVERRIDDEN');
+  })();
+  
   // ═══════════════════════════════════════════════════════════
   // ORIGINAL URL FOR LOCATION SPOOFING
   // ═══════════════════════════════════════════════════════════
@@ -382,12 +444,10 @@ function getFetchOverrideScript(originalUrl) {
   }
   
   // ═══════════════════════════════════════════════════════════
-  // UTILITY FUNCTIONS (MUST BE FIRST - used by location spoofing)
+  // NAVIGATION INTERCEPTION
   // ═══════════════════════════════════════════════════════════
   
-  // Store real location BEFORE any spoofing
-  var __realLocation__ = window.location;
-  var __realOrigin__ = __realLocation__.origin;
+  // __realLocation__ and __realOrigin__ already defined above
   
   // ═══════════════════════════════════════════════════════════
   // CRITICAL: INTERCEPT EXTERNAL NAVIGATION VIA BEFOREUNLOAD

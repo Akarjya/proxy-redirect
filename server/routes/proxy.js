@@ -233,6 +233,23 @@ router.get('/proxy', async (req, res) => {
       }
       res.set('Content-Type', 'text/html; charset=utf-8');
       
+      // ═══════════════════════════════════════════════════════════
+      // CSP SAFETY NET - Block direct external iframes
+      // Only allow iframes from our own origin (proxy paths)
+      // This catches any bypassing iframes that slip through other layers
+      // ═══════════════════════════════════════════════════════════
+      res.set('Content-Security-Policy', 
+        "frame-src 'self' blob: data:; " +
+        "frame-ancestors *; " +
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data:; " +
+        "connect-src * blob: data:; " +
+        "img-src * blob: data:; " +
+        "style-src 'self' 'unsafe-inline' blob: data:; " +
+        "font-src * blob: data:; " +
+        "media-src * blob: data:; " +
+        "object-src 'none';"
+      );
+      
     } else if (category === 'css') {
       responseBody = cssProcessor.processCss(responseBody, targetUrl);
       res.set('Content-Type', 'text/css; charset=utf-8');

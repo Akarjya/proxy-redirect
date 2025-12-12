@@ -6,14 +6,141 @@
  * 
  * Handles: fetch(), XMLHttpRequest, Image.src, Script.src, etc.
  * Also spoofs location/document.URL for Google Ads compatibility.
+ * 
+ * V2: Added document.write override for Google Ads injection interception
  */
 
 (function() {
   'use strict';
   
   console.log('[Proxy] ===================================');
-  console.log('[Proxy] FETCH-OVERRIDE SCRIPT LOADING...');
+  console.log('[Proxy] FETCH-OVERRIDE SCRIPT V2 LOADING...');
   console.log('[Proxy] ===================================');
+  
+  // Store real location FIRST before anything else
+  var __realLocation__ = window.location;
+  var __realOrigin__ = __realLocation__.origin;
+  
+  // ═══════════════════════════════════════════════════════════════════════
+  // CRITICAL: DOCUMENT.WRITE OVERRIDE - MUST BE FIRST!
+  // Google Ads uses document.write to inject iframe content synchronously
+  // This MUST run before any Google Ad script executes
+  // ═══════════════════════════════════════════════════════════════════════
+  (function() {
+    var originalWrite = document.write.bind(document);
+    var originalWriteln = document.writeln.bind(document);
+    
+    // Helper to encode URL to proxy format
+    function quickBase64Encode(str) {
+      try {
+        var base64 = btoa(unescape(encodeURIComponent(str)));
+        return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+      } catch(e) {
+        return null;
+      }
+    }
+    
+    // Helper to check if URL is external
+    function isExternalUrl(url) {
+      if (!url) return false;
+      if (url.startsWith('//')) url = 'https:' + url;
+      if (!url.startsWith('http://') && !url.startsWith('https://')) return false;
+      try {
+        var urlObj = new URL(url);
+        return urlObj.origin !== __realOrigin__;
+      } catch(e) {
+        return false;
+      }
+    }
+    
+    // Rewrite HTML content to proxy external URLs
+    function rewriteHtmlContent(html) {
+      if (!html || typeof html !== 'string') return html;
+      
+      // Rewrite iframe src attributes
+      html = html.replace(
+        /(<iframe[^>]*\s+src\s*=\s*["'])([^"']+)(["'])/gi,
+        function(match, prefix, url, suffix) {
+          // Handle protocol-relative URLs
+          if (url.startsWith('//')) url = 'https:' + url;
+          if (isExternalUrl(url) && !url.includes('/p/')) {
+            var encoded = quickBase64Encode(url);
+            if (encoded) {
+              console.log('[Proxy] document.write: Rewriting iframe src:', url.substring(0, 60));
+              return prefix + '/p/' + encoded + suffix;
+            }
+          }
+          return match;
+        }
+      );
+      
+      // Rewrite script src attributes
+      html = html.replace(
+        /(<script[^>]*\s+src\s*=\s*["'])([^"']+)(["'])/gi,
+        function(match, prefix, url, suffix) {
+          if (url.startsWith('//')) url = 'https:' + url;
+          if (isExternalUrl(url) && !url.includes('/p/')) {
+            var encoded = quickBase64Encode(url);
+            if (encoded) {
+              console.log('[Proxy] document.write: Rewriting script src:', url.substring(0, 60));
+              return prefix + '/p/' + encoded + suffix;
+            }
+          }
+          return match;
+        }
+      );
+      
+      // Rewrite img src attributes
+      html = html.replace(
+        /(<img[^>]*\s+src\s*=\s*["'])([^"']+)(["'])/gi,
+        function(match, prefix, url, suffix) {
+          if (url.startsWith('//')) url = 'https:' + url;
+          if (isExternalUrl(url) && !url.includes('/p/')) {
+            var encoded = quickBase64Encode(url);
+            if (encoded) {
+              return prefix + '/p/' + encoded + suffix;
+            }
+          }
+          return match;
+        }
+      );
+      
+      // Rewrite link href attributes (for stylesheets)
+      html = html.replace(
+        /(<link[^>]*\s+href\s*=\s*["'])([^"']+)(["'])/gi,
+        function(match, prefix, url, suffix) {
+          if (url.startsWith('//')) url = 'https:' + url;
+          if (isExternalUrl(url) && !url.includes('/p/')) {
+            var encoded = quickBase64Encode(url);
+            if (encoded) {
+              return prefix + '/p/' + encoded + suffix;
+            }
+          }
+          return match;
+        }
+      );
+      
+      return html;
+    }
+    
+    document.write = function() {
+      var args = Array.prototype.slice.call(arguments);
+      var rewrittenArgs = args.map(function(arg) {
+        return rewriteHtmlContent(arg);
+      });
+      return originalWrite.apply(document, rewrittenArgs);
+    };
+    
+    document.writeln = function() {
+      var args = Array.prototype.slice.call(arguments);
+      var rewrittenArgs = args.map(function(arg) {
+        return rewriteHtmlContent(arg);
+      });
+      return originalWriteln.apply(document, rewrittenArgs);
+    };
+    
+    console.log('[Proxy] ✅ document.write/writeln OVERRIDDEN');
+  })();
   
   // ═══════════════════════════════════════════════════════════════════════
   // CRITICAL: OVERRIDE document.createElement FOR IFRAMES
@@ -746,7 +873,149 @@
     link.setAttribute('data-proxy-url', toProxyUrl(href));
   }, true);
   
-  console.log('[Proxy] Runtime overrides active');
+  // ═══════════════════════════════════════════════════════════════════════
+  // WORKER/SHAREDWORKER CONSTRUCTOR OVERRIDE
+  // Web Workers can make independent requests that bypass proxy
+  // ═══════════════════════════════════════════════════════════════════════
+  (function() {
+    // Override Worker constructor
+    if (typeof Worker !== 'undefined') {
+      var OriginalWorker = Worker;
+      window.Worker = function(scriptUrl, options) {
+        if (shouldProxy(scriptUrl)) {
+          console.log('[Proxy] Intercepting Worker script:', scriptUrl.substring(0, 60));
+          scriptUrl = toProxyUrl(scriptUrl);
+        }
+        return new OriginalWorker(scriptUrl, options);
+      };
+      window.Worker.prototype = OriginalWorker.prototype;
+      console.log('[Proxy] ✅ Worker constructor overridden');
+    }
+    
+    // Override SharedWorker constructor
+    if (typeof SharedWorker !== 'undefined') {
+      var OriginalSharedWorker = SharedWorker;
+      window.SharedWorker = function(scriptUrl, options) {
+        if (shouldProxy(scriptUrl)) {
+          console.log('[Proxy] Intercepting SharedWorker script:', scriptUrl.substring(0, 60));
+          scriptUrl = toProxyUrl(scriptUrl);
+        }
+        return new OriginalSharedWorker(scriptUrl, options);
+      };
+      window.SharedWorker.prototype = OriginalSharedWorker.prototype;
+      console.log('[Proxy] ✅ SharedWorker constructor overridden');
+    }
+  })();
+  
+  // ═══════════════════════════════════════════════════════════════════════
+  // CONTENTWINDOW.LOCATION INTERCEPTION
+  // Scripts can navigate iframes via iframe.contentWindow.location
+  // ═══════════════════════════════════════════════════════════════════════
+  (function() {
+    try {
+      var iframeProto = HTMLIFrameElement.prototype;
+      var originalContentWindowGetter = Object.getOwnPropertyDescriptor(iframeProto, 'contentWindow');
+      
+      if (originalContentWindowGetter && originalContentWindowGetter.get) {
+        Object.defineProperty(iframeProto, 'contentWindow', {
+          get: function() {
+            var cw = originalContentWindowGetter.get.call(this);
+            if (!cw) return cw;
+            
+            // If not already wrapped, wrap the contentWindow location methods
+            if (!cw.__proxyLocationWrapped) {
+              try {
+                var realLocation = cw.location;
+                
+                // Override assign
+                if (realLocation.assign) {
+                  var originalAssign = realLocation.assign.bind(realLocation);
+                  realLocation.assign = function(url) {
+                    if (shouldProxy(url)) {
+                      console.log('[Proxy] contentWindow.location.assign intercepted:', url.substring(0, 60));
+                      url = toProxyUrl(url);
+                    }
+                    return originalAssign(url);
+                  };
+                }
+                
+                // Override replace
+                if (realLocation.replace) {
+                  var originalReplace = realLocation.replace.bind(realLocation);
+                  realLocation.replace = function(url) {
+                    if (shouldProxy(url)) {
+                      console.log('[Proxy] contentWindow.location.replace intercepted:', url.substring(0, 60));
+                      url = toProxyUrl(url);
+                    }
+                    return originalReplace(url);
+                  };
+                }
+                
+                cw.__proxyLocationWrapped = true;
+              } catch(e) {
+                // Cross-origin restriction - expected for external iframes
+              }
+            }
+            
+            return cw;
+          },
+          configurable: true
+        });
+        console.log('[Proxy] ✅ contentWindow getter overridden for location interception');
+      }
+    } catch(e) {
+      console.log('[Proxy] Could not override contentWindow:', e.message);
+    }
+  })();
+  
+  // ═══════════════════════════════════════════════════════════════════════
+  // ENHANCED LOCATION METHOD OVERRIDES
+  // More robust location.assign/replace interception
+  // ═══════════════════════════════════════════════════════════════════════
+  (function() {
+    try {
+      // Get reference to actual location object
+      var realLoc = window.location;
+      
+      // Override location.assign with more robust approach
+      var origAssign = realLoc.assign;
+      if (typeof origAssign === 'function') {
+        Object.defineProperty(realLoc, 'assign', {
+          value: function(url) {
+            if (shouldProxy(url)) {
+              console.log('[Proxy] 🔄 location.assign intercepted:', url.substring(0, 60));
+              url = toProxyUrl(url);
+            }
+            return origAssign.call(realLoc, url);
+          },
+          writable: true,
+          configurable: true
+        });
+      }
+      
+      // Override location.replace with more robust approach
+      var origReplace = realLoc.replace;
+      if (typeof origReplace === 'function') {
+        Object.defineProperty(realLoc, 'replace', {
+          value: function(url) {
+            if (shouldProxy(url)) {
+              console.log('[Proxy] 🔄 location.replace intercepted:', url.substring(0, 60));
+              url = toProxyUrl(url);
+            }
+            return origReplace.call(realLoc, url);
+          },
+          writable: true,
+          configurable: true
+        });
+      }
+      
+      console.log('[Proxy] ✅ Enhanced location methods overridden');
+    } catch(e) {
+      console.log('[Proxy] Enhanced location override failed (expected in some browsers):', e.message);
+    }
+  })();
+  
+  console.log('[Proxy] Runtime overrides active V2');
   if (ORIGINAL_URL) {
     console.log('[Proxy] Original URL:', ORIGINAL_URL);
   }

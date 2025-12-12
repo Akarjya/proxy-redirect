@@ -4,16 +4,46 @@
  * Intercepts all network requests and routes /p/* requests through the backend proxy.
  * Handles session management and request forwarding.
  * 
- * Version: 5 - ENHANCED FIX: Aggressive iframe interception
- * - Added explicit iframe destination detection
- * - Fixed Google Ad iframes bypassing proxy
- * - Special handling for destination === 'iframe'
- * - Ensures ALL ad requests go through proxy server
+ * Version: 7 - BULLETPROOF EDITION
+ * - Enhanced iframe interception for Google Ads
+ * - Better document/navigate mode handling for nested iframes
+ * - Explicit handling for all Google ad domains
+ * - Improved logging for debugging bypass issues
  */
 
 // FORCE UPDATE: Version with timestamp to bypass browser cache
-const SW_VERSION = 'v6-2024-12-12-data-href-fix';
-const CACHE_NAME = 'proxy-poc-v6-' + Date.now();
+const SW_VERSION = 'v7-2024-12-12-bulletproof';
+const CACHE_NAME = 'proxy-poc-v7-' + Date.now();
+
+// Google ad domains that MUST be proxied
+const GOOGLE_AD_DOMAINS = [
+  'googleads.g.doubleclick.net',
+  'pagead2.googlesyndication.com',
+  'securepubads.g.doubleclick.net',
+  'tpc.googlesyndication.com',
+  'googleadservices.com',
+  'www.googleadservices.com',
+  'googlesyndication.com',
+  'doubleclick.net',
+  'adtrafficquality.google',
+  'ep1.adtrafficquality.google',
+  'ep2.adtrafficquality.google'
+];
+
+/**
+ * Check if URL is from Google ad domain
+ */
+function isGoogleAdUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    const hostname = urlObj.hostname;
+    return GOOGLE_AD_DOMAINS.some(domain => 
+      hostname === domain || hostname.endsWith('.' + domain)
+    );
+  } catch(e) {
+    return false;
+  }
+}
 
 /**
  * Install event - Called when SW is first installed
@@ -207,6 +237,16 @@ self.addEventListener('fetch', (event) => {
   if (isExternalUrl(url)) {
     
     // ═══════════════════════════════════════════════════════════
+    // BULLETPROOF FIX: Check for Google Ad URLs FIRST
+    // These MUST ALWAYS be proxied, never redirected
+    // ═══════════════════════════════════════════════════════════
+    if (isGoogleAdUrl(url)) {
+      console.log(`[SW ${SW_VERSION}] 🎯 GOOGLE AD URL DETECTED - FORCING PROXY:`, url.substring(0, 100));
+      event.respondWith(handleExternalResource(event, url));
+      return;
+    }
+    
+    // ═══════════════════════════════════════════════════════════
     // CRITICAL FIX: Check iframe destination FIRST before anything else
     // Google Ad iframes have destination === 'iframe' with mode === 'navigate'
     // We MUST proxy them, not redirect them!
@@ -217,11 +257,38 @@ self.addEventListener('fetch', (event) => {
       return;
     }
     
+    // ═══════════════════════════════════════════════════════════
+    // BULLETPROOF FIX: Handle document destination with navigate mode
+    // This could be a nested iframe navigation - check referrer
+    // ═══════════════════════════════════════════════════════════
+    if (destination === 'document' && mode === 'navigate') {
+      const referrer = request.referrer;
+      // If referrer is from our proxy domain, this is likely an iframe navigation
+      if (referrer && referrer.includes(self.location.origin)) {
+        console.log(`[SW ${SW_VERSION}] 🎯 NESTED DOCUMENT NAVIGATION (from proxy) - PROXYING:`, url.substring(0, 100));
+        event.respondWith(handleExternalResource(event, url));
+        return;
+      }
+    }
+    
     // Also catch iframes with empty destination (some browsers)
     if (destination === '' && (mode === 'no-cors' || mode === 'cors' || mode === 'same-origin')) {
-      console.log(`[SW ${SW_VERSION}] 🎯 IFRAME DETECTED (dest='', mode=${mode}) - FORCING PROXY:`, url.substring(0, 100));
+      console.log(`[SW ${SW_VERSION}] 🎯 RESOURCE DETECTED (dest='', mode=${mode}) - FORCING PROXY:`, url.substring(0, 100));
       event.respondWith(handleExternalResource(event, url));
       return;
+    }
+    
+    // ═══════════════════════════════════════════════════════════
+    // Handle empty destination with navigate mode - could be iframe
+    // ═══════════════════════════════════════════════════════════
+    if (destination === '' && mode === 'navigate') {
+      // Check if this looks like it's from an ad context
+      const referrer = request.referrer;
+      if (referrer && (referrer.includes('/p/') || referrer.includes('googlesyndication') || referrer.includes('doubleclick'))) {
+        console.log(`[SW ${SW_VERSION}] 🎯 NAVIGATE WITH EMPTY DEST (ad context) - PROXYING:`, url.substring(0, 100));
+        event.respondWith(handleExternalResource(event, url));
+        return;
+      }
     }
     
     // Determine if this is a top-level navigation (NOT iframe navigation)
