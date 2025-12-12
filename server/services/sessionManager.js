@@ -64,17 +64,43 @@ class Session {
     for (const cookieStr of setCookieHeaders) {
       const parsed = parseCookie(cookieStr);
       if (parsed) {
-        const cookieDomain = parsed.domain || domain;
+        // Normalize domain - remove leading dot if present for consistency
+        let cookieDomain = parsed.domain || domain;
+        
+        // Handle domain attribute properly
+        // If domain starts with '.', it means the cookie is valid for subdomains
+        if (cookieDomain.startsWith('.')) {
+          // Keep the leading dot for subdomain matching
+          cookieDomain = cookieDomain;
+        } else if (parsed.domain) {
+          // If domain was explicitly set without leading dot, add it for subdomain matching
+          cookieDomain = '.' + cookieDomain;
+        }
+        
         if (!this.cookies[cookieDomain]) {
           this.cookies[cookieDomain] = {};
         }
+        
+        // Store the cookie with all relevant attributes
         this.cookies[cookieDomain][parsed.name] = {
           value: parsed.value,
           expires: parsed.expires,
           path: parsed.path || '/',
           secure: parsed.secure,
-          httpOnly: parsed.httpOnly
+          httpOnly: parsed.httpOnly,
+          sameSite: parsed.sameSite,
+          originalDomain: domain // Keep track of where it came from
         };
+        
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/0340e72d-1340-460d-ba20-9cf1a26cf9a8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sessionManager.js:storeCookie',message:'Cookie stored',data:{name:parsed.name,domain:cookieDomain,path:parsed.path},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H8-COOKIE'})}).catch(()=>{});
+        // #endregion
+        
+        // Also store under the exact domain for exact matches
+        if (!this.cookies[domain]) {
+          this.cookies[domain] = {};
+        }
+        this.cookies[domain][parsed.name] = this.cookies[cookieDomain][parsed.name];
       }
     }
   }
@@ -82,31 +108,60 @@ class Session {
   /**
    * Get cookies for a specific domain
    * @param {string} targetDomain - Target domain
+   * @param {string} path - Request path (optional, defaults to '/')
    * @returns {string} - Cookie header value
    */
-  getCookiesForDomain(targetDomain) {
-    const matchingCookies = [];
+  getCookiesForDomain(targetDomain, path = '/') {
+    const matchingCookies = new Map(); // Use Map to avoid duplicates
 
     for (const [cookieDomain, cookies] of Object.entries(this.cookies)) {
-      // Check domain matching
-      const matches = 
-        targetDomain === cookieDomain ||
-        (cookieDomain.startsWith('.') && targetDomain.endsWith(cookieDomain)) ||
-        targetDomain.endsWith('.' + cookieDomain);
+      // Check domain matching (RFC 6265 compliant)
+      let matches = false;
+      
+      // Exact match
+      if (targetDomain === cookieDomain) {
+        matches = true;
+      }
+      // Domain attribute with leading dot - matches subdomains
+      else if (cookieDomain.startsWith('.')) {
+        const domainWithoutDot = cookieDomain.substring(1);
+        matches = targetDomain === domainWithoutDot || 
+                  targetDomain.endsWith(cookieDomain);
+      }
+      // Domain without leading dot
+      else {
+        matches = targetDomain.endsWith('.' + cookieDomain);
+      }
 
       if (!matches) continue;
 
       for (const [name, cookie] of Object.entries(cookies)) {
         // Check expiration
-        if (cookie.expires && new Date(cookie.expires) < new Date()) {
+        if (cookie.expires) {
+          const expiryDate = new Date(cookie.expires);
+          if (expiryDate < new Date()) {
+            continue; // Cookie expired
+          }
+        }
+        
+        // Check path matching
+        const cookiePath = cookie.path || '/';
+        if (!path.startsWith(cookiePath)) {
           continue;
         }
 
-        matchingCookies.push(`${name}=${cookie.value}`);
+        // Add to matching cookies (Map prevents duplicates)
+        matchingCookies.set(name, cookie.value);
       }
     }
 
-    return matchingCookies.join('; ');
+    // Convert to cookie header string
+    const cookiePairs = [];
+    for (const [name, value] of matchingCookies) {
+      cookiePairs.push(`${name}=${value}`);
+    }
+
+    return cookiePairs.join('; ');
   }
 }
 
@@ -124,16 +179,18 @@ function parseCookie(cookieStr) {
   const [name, ...valueParts] = nameValue.split('=');
   const value = valueParts.join('=');
 
-  if (!name || !value) return null;
+  // Name is required, but value can be empty (for cookie deletion)
+  if (!name) return null;
 
   const cookie = {
     name: name.trim(),
-    value: value.trim(),
+    value: (value || '').trim(),
     domain: null,
     path: '/',
     expires: null,
     secure: false,
-    httpOnly: false
+    httpOnly: false,
+    sameSite: null
   };
 
   for (const attr of attributes) {
@@ -154,7 +211,12 @@ function parseCookie(cookieStr) {
       case 'max-age':
         const maxAge = parseInt(attrValue);
         if (!isNaN(maxAge)) {
-          cookie.expires = new Date(Date.now() + maxAge * 1000).toUTCString();
+          if (maxAge <= 0) {
+            // Cookie should be deleted
+            cookie.expires = new Date(0).toUTCString();
+          } else {
+            cookie.expires = new Date(Date.now() + maxAge * 1000).toUTCString();
+          }
         }
         break;
       case 'secure':
@@ -162,6 +224,9 @@ function parseCookie(cookieStr) {
         break;
       case 'httponly':
         cookie.httpOnly = true;
+        break;
+      case 'samesite':
+        cookie.sameSite = attrValue ? attrValue.trim().toLowerCase() : 'lax';
         break;
     }
   }
@@ -256,4 +321,5 @@ module.exports = {
   cleanupExpiredSessions,
   Session
 };
+
 

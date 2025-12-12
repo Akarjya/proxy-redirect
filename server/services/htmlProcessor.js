@@ -258,6 +258,64 @@ function getWebRtcBlockScript() {
   }
   
   console.log('[Proxy] WebRTC blocked');
+  
+  // ═══════════════════════════════════════════════════════════
+  // WEBSOCKET OVERRIDE - Intercept and proxy WebSocket connections
+  // WebSockets can bypass proxy, so we need to handle them
+  // ═══════════════════════════════════════════════════════════
+  (function() {
+    var OriginalWebSocket = window.WebSocket;
+    var proxyOrigin = window.location.origin;
+    
+    // Helper to check if WebSocket URL is external
+    function isExternalWsUrl(url) {
+      try {
+        var wsUrl = new URL(url);
+        var httpOrigin = wsUrl.protocol === 'wss:' ? 'https://' : 'http://';
+        httpOrigin += wsUrl.host;
+        return httpOrigin !== proxyOrigin;
+      } catch(e) {
+        return false;
+      }
+    }
+    
+    // Helper to convert ws/wss to http/https for logging
+    function wsToHttp(url) {
+      return url.replace('wss://', 'https://').replace('ws://', 'http://');
+    }
+    
+    // Override WebSocket constructor
+    window.WebSocket = function(url, protocols) {
+      // Log the connection attempt
+      console.log('[Proxy] WebSocket connection attempt:', url);
+      
+      // If it's an external WebSocket, we can't proxy it through HTTP
+      // Options: 1) Block it, 2) Allow direct connection (IP leak risk)
+      // For security, we log a warning but allow the connection
+      // A more secure approach would be to set up a WebSocket proxy
+      if (isExternalWsUrl(url)) {
+        console.warn('[Proxy] External WebSocket detected:', url.substring(0, 60));
+        console.warn('[Proxy] WebSocket connections may bypass proxy - potential IP leak');
+        // For now, allow the connection but log it
+        // To block: throw new Error('External WebSocket blocked for security');
+      }
+      
+      // Create the WebSocket with original constructor
+      if (protocols !== undefined) {
+        return new OriginalWebSocket(url, protocols);
+      }
+      return new OriginalWebSocket(url);
+    };
+    
+    // Copy static properties
+    window.WebSocket.CONNECTING = OriginalWebSocket.CONNECTING;
+    window.WebSocket.OPEN = OriginalWebSocket.OPEN;
+    window.WebSocket.CLOSING = OriginalWebSocket.CLOSING;
+    window.WebSocket.CLOSED = OriginalWebSocket.CLOSED;
+    window.WebSocket.prototype = OriginalWebSocket.prototype;
+    
+    console.log('[Proxy] WebSocket override active');
+  })();
 })();
 `;
 }
@@ -791,6 +849,67 @@ function getFetchOverrideScript(originalUrl) {
     // Only left click
     if (e.button !== 0) return;
     setTimeout(function() { handleExternalClick(e); }, 10);
+  }, true);
+  
+  // ═══════════════════════════════════════════════════════════
+  // INTERCEPT DATA-HREF NAVIGATION (for JS-driven clicks)
+  // Elements with data-href that use JavaScript to navigate
+  // ═══════════════════════════════════════════════════════════
+  function handleDataHrefClick(e) {
+    var target = e.target;
+    var element = target;
+    
+    // Find element with data-href (traverse up to 5 levels)
+    var maxDepth = 5;
+    while (element && maxDepth-- > 0) {
+      var dataHref = element.getAttribute && element.getAttribute('data-href');
+      if (dataHref) {
+        // Found data-href element
+        console.log('[Proxy] Intercepting data-href click:', dataHref.substring(0, 60));
+        
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        
+        // Check if it's already a proxy URL
+        if (dataHref.startsWith('/p/')) {
+          __realLocation__.href = dataHref;
+        } else if (dataHref.startsWith('http://') || dataHref.startsWith('https://')) {
+          // External URL - proxy it
+          __realLocation__.href = toProxyUrl(dataHref);
+        } else {
+          // Relative URL - resolve against original URL and proxy
+          if (ORIGINAL_URL_OBJ) {
+            try {
+              var resolved = new URL(dataHref, ORIGINAL_URL_OBJ.href).href;
+              __realLocation__.href = toProxyUrl(resolved);
+            } catch(resolveErr) {
+              // Fallback to direct navigation
+              __realLocation__.href = dataHref;
+            }
+          } else {
+            __realLocation__.href = dataHref;
+          }
+        }
+        return false;
+      }
+      element = element.parentElement;
+    }
+  }
+  
+  // Listen for clicks on elements with data-href
+  document.addEventListener('click', handleDataHrefClick, true);
+  
+  // Also handle keyboard navigation (Enter/Space on data-href elements)
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      var target = e.target;
+      var dataHref = target.getAttribute && target.getAttribute('data-href');
+      if (dataHref) {
+        e.preventDefault();
+        handleDataHrefClick(e);
+      }
+    }
   }, true);
   
   console.log('[Proxy] Runtime overrides active' + (ORIGINAL_URL ? ', spoofing: ' + ORIGINAL_URL : ''));

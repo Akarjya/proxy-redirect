@@ -119,6 +119,41 @@
       return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     }
     
+    // Verify Service Worker is truly controlling the page
+    async function verifySWControl(maxAttempts = 10) {
+      for (let i = 0; i < maxAttempts; i++) {
+        if (navigator.serviceWorker.controller) {
+          console.log('[Init] SW is controlling the page');
+          return true;
+        }
+        console.log('[Init] Waiting for SW to control page... attempt', i + 1);
+        await new Promise(r => setTimeout(r, 200));
+      }
+      return false;
+    }
+    
+    // Test that SW is intercepting requests
+    async function testSWInterception() {
+      try {
+        // Make a test request that SW should intercept
+        const testUrl = 'https://httpbin.org/get';
+        const encodedTest = base64UrlEncode(testUrl);
+        const proxyTestUrl = '/p/' + encodedTest;
+        
+        const response = await fetch(proxyTestUrl, { 
+          method: 'HEAD',
+          cache: 'no-store'
+        });
+        
+        // If we get a response (even error), SW is working
+        console.log('[Init] SW interception test:', response.status);
+        return response.status !== 0;
+      } catch (e) {
+        console.warn('[Init] SW interception test failed:', e.message);
+        return false;
+      }
+    }
+    
     // Main initialization
     async function initialize() {
       try {
@@ -129,28 +164,72 @@
           throw new Error('Service Workers not supported. Please use a modern browser.');
         }
         
-        await new Promise(r => setTimeout(r, 300));
+        // Step 2: Unregister old SW if exists and register fresh
+        updateProgress(20, 'Preparing service worker...');
         
-        // Step 2: Register Service Worker
+        // Force update by unregistering first if there's an issue
+        const existingReg = await navigator.serviceWorker.getRegistration('/');
+        if (existingReg) {
+          console.log('[Init] Existing SW found, checking for updates...');
+          await existingReg.update();
+        }
+        
+        // Step 3: Register Service Worker
         updateProgress(30, 'Installing service worker...');
         
         const registration = await navigator.serviceWorker.register('/sw.js', {
-          scope: '/'
+          scope: '/',
+          updateViaCache: 'none' // Always fetch fresh SW
         });
         
         console.log('[Init] SW registered:', registration.scope);
         
-        // Step 3: Wait for SW to be ready
-        updateProgress(50, 'Activating service worker...');
+        // Step 4: Wait for SW to be ready
+        updateProgress(40, 'Activating service worker...');
         
         await navigator.serviceWorker.ready;
         console.log('[Init] SW ready');
         
-        // Additional wait to ensure SW has claimed clients
-        await new Promise(r => setTimeout(r, 500));
+        // Step 5: Ensure SW is controlling the page
+        updateProgress(50, 'Verifying service worker control...');
         
-        // Step 4: Create/get session
-        updateProgress(70, 'Creating secure session...');
+        // If SW just installed, it might not control yet - force reload once
+        if (!navigator.serviceWorker.controller) {
+          console.log('[Init] SW not controlling yet, waiting for claim...');
+          
+          // Listen for controllerchange
+          await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              reject(new Error('Service Worker failed to take control. Please refresh.'));
+            }, 5000);
+            
+            navigator.serviceWorker.addEventListener('controllerchange', () => {
+              clearTimeout(timeout);
+              console.log('[Init] SW now controlling page');
+              resolve();
+            }, { once: true });
+            
+            // Also check periodically in case event was missed
+            const checkInterval = setInterval(() => {
+              if (navigator.serviceWorker.controller) {
+                clearTimeout(timeout);
+                clearInterval(checkInterval);
+                resolve();
+              }
+            }, 100);
+          });
+        }
+        
+        // Step 6: Verify SW is actually intercepting
+        updateProgress(60, 'Testing proxy connection...');
+        
+        const isIntercepting = await verifySWControl();
+        if (!isIntercepting) {
+          console.warn('[Init] SW control verification failed, proceeding anyway...');
+        }
+        
+        // Step 7: Create/get session
+        updateProgress(75, 'Creating secure session...');
         
         const sessionResponse = await fetch('/api/session', {
           method: 'POST',
@@ -164,10 +243,16 @@
         const sessionData = await sessionResponse.json();
         console.log('[Init] Session created:', sessionData.sessionId?.substring(0, 8) + '...');
         
-        // Step 5: Redirect to target site
-        updateProgress(90, 'Redirecting to content...');
+        // Step 8: Final verification before redirect
+        updateProgress(85, 'Final verification...');
         
-        await new Promise(r => setTimeout(r, 500));
+        // Double-check SW is still controlling
+        if (!navigator.serviceWorker.controller) {
+          throw new Error('Service Worker lost control. Please refresh the page.');
+        }
+        
+        // Step 9: Redirect to target site
+        updateProgress(95, 'Redirecting to content...');
         
         // Encode target URL and redirect
         const encodedTarget = base64UrlEncode(TARGET_SITE);
@@ -175,8 +260,8 @@
         
         updateProgress(100, 'Loading content...');
         
-        // Small delay before redirect
-        await new Promise(r => setTimeout(r, 300));
+        // Small delay to ensure UI updates
+        await new Promise(r => setTimeout(r, 100));
         
         // Navigate to proxied target
         window.location.href = proxyUrl;

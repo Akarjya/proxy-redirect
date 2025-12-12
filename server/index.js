@@ -35,10 +35,32 @@ app.use(compression());
 // Parse cookies
 app.use(cookieParser());
 
-// Parse JSON and URL-encoded bodies
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-app.use(express.raw({ type: '*/*', limit: '10mb' }));
+// IMPORTANT: For proxy routes, we need raw body to forward exactly as received
+// Use raw body parser for proxy POST requests BEFORE json/urlencoded parsers
+app.use('/api/proxy', (req, res, next) => {
+  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+    express.raw({ type: '*/*', limit: '50mb' })(req, res, next);
+  } else {
+    next();
+  }
+});
+
+// Parse JSON and URL-encoded bodies for non-proxy routes
+app.use((req, res, next) => {
+  // Skip body parsing for proxy routes (already handled above)
+  if (req.path.startsWith('/api/proxy')) {
+    return next();
+  }
+  express.json({ limit: '10mb' })(req, res, next);
+});
+
+app.use((req, res, next) => {
+  // Skip body parsing for proxy routes
+  if (req.path.startsWith('/api/proxy')) {
+    return next();
+  }
+  express.urlencoded({ extended: true, limit: '10mb' })(req, res, next);
+});
 
 // Request logging
 app.use((req, res, next) => {

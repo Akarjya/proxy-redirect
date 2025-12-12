@@ -14,6 +14,8 @@ const { URL } = require('url');
 const CSS_URL_PATTERN = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
 const CSS_IMPORT_PATTERN = /@import\s+(['"])([^'"]+)\1/gi;
 const CSS_IMPORT_URL_PATTERN = /@import\s+url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+// Pattern for protocol-relative URLs in CSS
+const PROTOCOL_RELATIVE_PATTERN = /^\/\/[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}/;
 
 /**
  * Check if URL should be skipped (not proxied)
@@ -24,6 +26,11 @@ function shouldSkipUrl(url) {
   if (!url) return true;
   
   const trimmed = url.trim();
+  
+  // Don't skip protocol-relative URLs - they need to be proxied
+  if (trimmed.startsWith('//')) {
+    return false;
+  }
   
   return (
     trimmed === '' ||
@@ -37,12 +44,17 @@ function shouldSkipUrl(url) {
 
 /**
  * Resolve a relative URL against a base URL
+ * Handles protocol-relative URLs (//example.com)
  * @param {string} relativeUrl - The relative URL
  * @param {string} baseUrl - The base URL (CSS file URL)
  * @returns {string} - Absolute URL
  */
 function resolveUrl(relativeUrl, baseUrl) {
   try {
+    // Handle protocol-relative URLs
+    if (relativeUrl && relativeUrl.startsWith('//')) {
+      return 'https:' + relativeUrl;
+    }
     return new URL(relativeUrl, baseUrl).href;
   } catch (e) {
     // If URL resolution fails, return original

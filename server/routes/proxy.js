@@ -13,6 +13,7 @@ const sessionManager = require('../services/sessionManager');
 const contentFetcher = require('../services/contentFetcher');
 const htmlProcessor = require('../services/htmlProcessor');
 const cssProcessor = require('../services/cssProcessor');
+const jsProcessor = require('../services/jsProcessor');
 const logger = require('../utils/logger');
 
 const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME || 'proxy_session';
@@ -132,7 +133,19 @@ router.get('/proxy', async (req, res) => {
   }
   
   try {
-    logger.info('Starting proxy fetch', { url: targetUrl.substring(0, 60) });
+    // ═══════════════════════════════════════════════════════════
+    // LOG AD REQUESTS FOR DEBUGGING
+    // ═══════════════════════════════════════════════════════════
+    const isAdRequest = isGoogleAdDomain(targetUrl);
+    if (isAdRequest) {
+      logger.info('🎯 GOOGLE AD REQUEST DETECTED', { 
+        url: targetUrl.substring(0, 100),
+        sessionId: session.id.substring(0, 8),
+        ip: 'will-be-proxied-through-922proxy'
+      });
+    }
+    
+    logger.info('Starting proxy fetch', { url: targetUrl.substring(0, 60), isAd: isAdRequest });
     
     // Build options from request headers
     const options = {
@@ -169,7 +182,7 @@ router.get('/proxy', async (req, res) => {
     // Set response headers
     res.status(result.response.status);
     
-    // Forward safe headers
+    // Forward safe headers (excluding security headers that would block our scripts)
     const headersToForward = [
       'content-type',
       'cache-control',
@@ -178,11 +191,34 @@ router.get('/proxy', async (req, res) => {
       'etag'
     ];
     
+    // Headers to explicitly NOT forward (these can block our injected scripts)
+    // - Content-Security-Policy: blocks inline scripts
+    // - X-Frame-Options: blocks iframe embedding
+    // - X-Content-Type-Options: can cause issues with modified content
+    const headersToBlock = [
+      'content-security-policy',
+      'content-security-policy-report-only',
+      'x-frame-options',
+      'x-xss-protection'
+    ];
+    
     for (const header of headersToForward) {
       const value = result.response.headers.get(header);
       if (value) {
         res.set(header, value);
       }
+    }
+    
+    // Log if we're blocking CSP (for debugging)
+    const csp = result.response.headers.get('content-security-policy');
+    if (csp) {
+      logger.debug('Blocked CSP header from response', { 
+        url: targetUrl.substring(0, 50),
+        csp: csp.substring(0, 100) + '...'
+      });
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/0340e72d-1340-460d-ba20-9cf1a26cf9a8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'proxy.js:cspBlock',message:'CSP header blocked',data:{url:targetUrl.substring(0,60),csp:csp.substring(0,80)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H3-CSP-BLOCK'})}).catch(()=>{});
+      // #endregion
     }
     
     // Process content based on type
@@ -200,6 +236,14 @@ router.get('/proxy', async (req, res) => {
     } else if (category === 'css') {
       responseBody = cssProcessor.processCss(responseBody, targetUrl);
       res.set('Content-Type', 'text/css; charset=utf-8');
+      
+    } else if (category === 'js') {
+      // Process JavaScript to rewrite external URLs
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/0340e72d-1340-460d-ba20-9cf1a26cf9a8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'proxy.js:jsProcess',message:'Processing JS file',data:{url:targetUrl.substring(0,60),size:responseBody?.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1-JS-REWRITE'})}).catch(()=>{});
+      // #endregion
+      responseBody = jsProcessor.processJs(responseBody, targetUrl);
+      res.set('Content-Type', 'application/javascript; charset=utf-8');
     }
     
     // Send response
