@@ -75,8 +75,7 @@ function buildProxyHeaders(originalHeaders, session, targetUrl) {
  * @returns {Promise<Object>} - Response object with body, headers, status
  */
 // Check if proxy should be used (can be disabled for testing)
-// TEMPORARY: Disabled proxy for testing due to 922proxy TLS issues
-const USE_PROXY = process.env.USE_PROXY === 'true'; // Changed: now defaults to false
+const USE_PROXY = process.env.USE_PROXY !== 'false';
 
 // Retry configuration
 const RETRY_CONFIG = {
