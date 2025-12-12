@@ -28,6 +28,22 @@ const URL_ATTRIBUTES = {
   'area': ['href'],
 };
 
+// Data attributes that commonly contain URLs and need to be rewritten
+const DATA_URL_ATTRIBUTES = [
+  'data-href',
+  'data-src',
+  'data-url',
+  'data-link',
+  'data-target',
+  'data-action',
+  'data-background',
+  'data-image',
+  'data-poster',
+  'data-lazy-src',
+  'data-srcset',
+  'data-original',
+];
+
 // URLs to skip (not proxy)
 function shouldSkipUrl(url) {
   if (!url) return true;
@@ -589,21 +605,23 @@ function getFetchOverrideScript(originalUrl) {
       var _replace = location.replace;
       
       if (typeof _assign === 'function') {
-        location.assign = function(url) {
-          if (shouldProxy(url)) url = toProxyUrl(url);
-          return _assign.call(location, url);
-        };
+        try {
+          location.assign = function(url) {
+            if (shouldProxy(url)) url = toProxyUrl(url);
+            return _assign.call(location, url);
+          };
+        } catch(ae) { /* Expected in strict browsers */ }
       }
       
       if (typeof _replace === 'function') {
-        location.replace = function(url) {
-          if (shouldProxy(url)) url = toProxyUrl(url);
-          return _replace.call(location, url);
-        };
+        try {
+          location.replace = function(url) {
+            if (shouldProxy(url)) url = toProxyUrl(url);
+            return _replace.call(location, url);
+          };
+        } catch(re) { /* Expected in strict browsers */ }
       }
-    } catch(e) {
-      console.log('[Proxy] Location override not available - using SW fallback');
-    }
+    } catch(e) { /* Location override not available - SW handles fallback */ }
   })();
   
   // ═══════════════════════════════════════════════════════════
@@ -862,6 +880,23 @@ function processHtml(html, pageUrl, options = {}) {
       if ($elem.attr('integrity')) {
         $elem.removeAttr('integrity');
       }
+    });
+  }
+  
+  // ═══════════════════════════════════════════════════════════
+  // REWRITE DATA-* URL ATTRIBUTES (like data-href, data-src)
+  // These are commonly used in JavaScript-driven navigation
+  // ═══════════════════════════════════════════════════════════
+  for (const dataAttr of DATA_URL_ATTRIBUTES) {
+    $(`[${dataAttr}]`).each((i, elem) => {
+      const $elem = $(elem);
+      const value = $elem.attr(dataAttr);
+      if (!value || shouldSkipUrl(value)) return;
+      
+      // Resolve and proxy the URL
+      const resolved = resolveUrl(value, baseUrl);
+      const proxied = toProxyUrl(resolved, baseUrl);
+      $elem.attr(dataAttr, proxied);
     });
   }
   
@@ -1311,6 +1346,21 @@ function processGoogleAdHtml(html, pageUrl) {
       if ($elem.attr('integrity')) {
         $elem.removeAttr('integrity');
       }
+    });
+  }
+  
+  // ═══════════════════════════════════════════════════════════
+  // REWRITE DATA-* URL ATTRIBUTES (like data-href, data-src)
+  // ═══════════════════════════════════════════════════════════
+  for (const dataAttr of DATA_URL_ATTRIBUTES) {
+    $(`[${dataAttr}]`).each((i, elem) => {
+      const $elem = $(elem);
+      const value = $elem.attr(dataAttr);
+      if (!value || shouldSkipUrl(value)) return;
+      
+      const resolved = resolveUrl(value, baseUrl);
+      const proxied = toProxyUrl(resolved, baseUrl);
+      $elem.attr(dataAttr, proxied);
     });
   }
   

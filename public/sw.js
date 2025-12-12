@@ -12,8 +12,8 @@
  */
 
 // FORCE UPDATE: Version with timestamp to bypass browser cache
-const SW_VERSION = 'v5-2024-12-11-force-update';
-const CACHE_NAME = 'proxy-poc-v5-' + Date.now();
+const SW_VERSION = 'v6-2024-12-12-data-href-fix';
+const CACHE_NAME = 'proxy-poc-v6-' + Date.now();
 
 /**
  * Install event - Called when SW is first installed
@@ -324,6 +324,23 @@ async function handleExternalResource(event, url) {
 }
 
 /**
+ * Check if a string looks like a valid base64 encoded URL
+ */
+function isValidBase64Url(str) {
+  if (!str || str.length < 10) return false;
+  // Valid base64 URL chars: a-z, A-Z, 0-9, -, _
+  if (!/^[a-zA-Z0-9\-_]+$/.test(str)) return false;
+  // Should not look like a file path (no dots unless in base64)
+  if (str.includes('.') && !str.includes('_') && str.length < 20) return false;
+  return true;
+}
+
+/**
+ * Store for last known original URL (for resolving relative paths)
+ */
+let lastKnownOriginalUrl = null;
+
+/**
  * Handle proxy request - Forward to backend
  */
 async function handleProxyRequest(event) {
@@ -340,18 +357,60 @@ async function handleProxyRequest(event) {
     
     // Decode to get target URL
     let targetUrl;
-    try {
-      targetUrl = base64UrlDecode(encodedUrl);
-    } catch (e) {
-      console.error('[SW] Failed to decode URL:', e);
-      return new Response('Invalid encoded URL', { status: 400 });
+    let actualEncodedUrl = encodedUrl;
+    
+    // Check if it looks like valid base64
+    if (isValidBase64Url(encodedUrl)) {
+      try {
+        targetUrl = base64UrlDecode(encodedUrl);
+        // Store as last known URL if it's a valid page URL
+        if (targetUrl.endsWith('.html') || targetUrl.endsWith('/') || !targetUrl.includes('.')) {
+          lastKnownOriginalUrl = targetUrl;
+        }
+      } catch (e) {
+        console.error('[SW] Failed to decode URL:', e);
+        targetUrl = null;
+      }
+    }
+    
+    // If decoding failed or it's not valid base64, try to resolve as relative URL
+    if (!targetUrl) {
+      console.log(`[SW ${SW_VERSION}] Malformed proxy URL detected:`, encodedUrl);
+      
+      // Try to resolve against last known original URL
+      if (lastKnownOriginalUrl) {
+        try {
+          const baseUrl = new URL(lastKnownOriginalUrl);
+          // Get base path (remove filename if present)
+          let basePath = baseUrl.href;
+          if (!basePath.endsWith('/')) {
+            basePath = basePath.substring(0, basePath.lastIndexOf('/') + 1);
+          }
+          targetUrl = new URL(encodedUrl, basePath).href;
+          actualEncodedUrl = base64UrlEncode(targetUrl);
+          console.log(`[SW ${SW_VERSION}] Resolved malformed URL: ${encodedUrl} -> ${targetUrl}`);
+        } catch (resolveErr) {
+          console.error('[SW] Failed to resolve relative URL:', resolveErr);
+          return new Response(`Invalid proxy URL: ${encodedUrl}. Unable to resolve as relative path.`, { 
+            status: 400,
+            headers: { 'Content-Type': 'text/plain' }
+          });
+        }
+      } else {
+        // No last known URL - can't resolve
+        console.error('[SW] No last known URL to resolve against');
+        return new Response(`Invalid proxy URL: ${encodedUrl}. No context to resolve relative path.`, { 
+          status: 400,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      }
     }
     
     console.log('[SW] Proxying:', targetUrl.substring(0, 50) + '...');
     
     // Build request to backend proxy API
     const proxyApiUrl = new URL('/api/proxy', self.location.origin);
-    proxyApiUrl.searchParams.set('url', encodedUrl);
+    proxyApiUrl.searchParams.set('url', actualEncodedUrl);
     
     // Forward relevant headers
     const headers = new Headers();

@@ -345,6 +345,8 @@
   // ═══════════════════════════════════════════════════════════════════════
   
   // Try to wrap location methods (may silently fail in some browsers)
+  // Note: Modern browsers restrict location property modifications
+  // The Service Worker handles navigation interception as a fallback
   (function() {
     try {
       // Store original methods
@@ -353,27 +355,32 @@
       
       // Try to override (will silently fail if not allowed)
       if (typeof _assign === 'function') {
-        location.assign = function(url) {
-          if (shouldProxy(url)) {
-            console.log('[Proxy] Intercepting location.assign:', url.substring(0, 60));
-            url = toProxyUrl(url);
-          }
-          return _assign.call(location, url);
-        };
+        try {
+          location.assign = function(url) {
+            if (shouldProxy(url)) {
+              url = toProxyUrl(url);
+            }
+            return _assign.call(location, url);
+          };
+        } catch(assignErr) {
+          // Expected in strict browsers - silently ignore
+        }
       }
       
       if (typeof _replace === 'function') {
-        location.replace = function(url) {
-          if (shouldProxy(url)) {
-            console.log('[Proxy] Intercepting location.replace:', url.substring(0, 60));
-            url = toProxyUrl(url);
-          }
-          return _replace.call(location, url);
-        };
+        try {
+          location.replace = function(url) {
+            if (shouldProxy(url)) {
+              url = toProxyUrl(url);
+            }
+            return _replace.call(location, url);
+          };
+        } catch(replaceErr) {
+          // Expected in strict browsers - silently ignore
+        }
       }
     } catch(e) {
-      // Silently ignore - Service Worker will handle navigation interception
-      console.log('[Proxy] Location override not available - using SW fallback');
+      // Silently ignore - Service Worker handles navigation interception as fallback
     }
   })();
   
