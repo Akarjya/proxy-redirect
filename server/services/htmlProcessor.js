@@ -1234,8 +1234,10 @@ function getAdIframeInterceptScript() {
   })();
   
   // ═══════════════════════════════════════════════════════════
-  // INTERCEPT ALL CLICK EVENTS
+  // INTERCEPT ALL CLICK EVENTS - CRITICAL FIX!
   // This is the main interception for ad clicks
+  // IMPORTANT: Must handle BOTH external URLs AND proxied URLs
+  // because ad links are rewritten to /p/xxx format
   // ═══════════════════════════════════════════════════════════
   function handleClick(e) {
     var target = e.target;
@@ -1256,29 +1258,56 @@ function getAdIframeInterceptScript() {
     var href = link.href;
     if (!href) return;
     
-    // Check if this is an external URL that needs proxying
-    if (isExternalUrl(href)) {
-      console.log('[Proxy:AdFrame] Intercepting click to:', href.substring(0, 60));
-      
+    // Skip special URLs
+    if (href.startsWith('javascript:') || href.startsWith('#') || href.startsWith('data:')) {
+      return;
+    }
+    
+    // Determine if this needs TOP window navigation
+    var needsTopNavigation = false;
+    var finalUrl = href;
+    
+    // CASE 1: Already a proxied URL (/p/xxx) - navigate TOP window to this URL
+    if (isAlreadyProxied(href)) {
+      needsTopNavigation = true;
+      finalUrl = href;
+      console.log('[Proxy:AdFrame] Intercepting proxied link click:', href.substring(0, 60));
+    }
+    // CASE 2: External URL - convert to proxy and navigate TOP window
+    else if (isExternalUrl(href)) {
+      needsTopNavigation = true;
+      finalUrl = toProxyUrl(href);
+      console.log('[Proxy:AdFrame] Intercepting external link click:', href.substring(0, 60));
+    }
+    
+    // If we need to navigate the TOP window
+    if (needsTopNavigation) {
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
       
-      var proxyUrl = toProxyUrl(href);
+      console.log('[Proxy:AdFrame] Navigating TOP window to:', finalUrl.substring(0, 80));
       
-      // Always navigate the TOP window through proxy
-      // This ensures the user stays in the proxied environment
+      // CRITICAL: Always navigate the TOP window, not the iframe!
+      // This ensures advertiser landing page opens in FULL PAGE, not tiny ad space
       try {
         if (window.top && window.top !== window) {
-          window.top.location.href = proxyUrl;
+          window.top.location.href = finalUrl;
         } else if (window.parent && window.parent !== window) {
-          window.parent.location.href = proxyUrl;
+          window.parent.location.href = finalUrl;
         } else {
-          __realLocation__.href = proxyUrl;
+          // Fallback: we ARE the top window
+          __realLocation__.href = finalUrl;
         }
       } catch(err) {
-        // Cross-origin restriction - use current window
-        __realLocation__.href = proxyUrl;
+        // Cross-origin restriction - try parent, then current window
+        console.log('[Proxy:AdFrame] Cross-origin detected, trying alternative:', err.message);
+        try {
+          window.parent.location.href = finalUrl;
+        } catch(e2) {
+          // Last resort: navigate current window (will still be in iframe, but at least works)
+          __realLocation__.href = finalUrl;
+        }
       }
       
       return false;
@@ -1398,13 +1427,43 @@ function getAdIframeInterceptScript() {
   } catch(e) { /* Cross-origin restriction - expected */ }
   
   // ═══════════════════════════════════════════════════════════
-  // INTERCEPT form submissions
+  // INTERCEPT form submissions - CRITICAL: Navigate TOP window
   // ═══════════════════════════════════════════════════════════
   document.addEventListener('submit', function(e) {
     var form = e.target;
-    if (form && form.action && isExternalUrl(form.action)) {
-      console.log('[Proxy:AdFrame] Intercepting form submit:', form.action.substring(0, 60));
-      form.action = toProxyUrl(form.action);
+    if (!form || !form.action) return;
+    
+    var action = form.action;
+    var needsTopNavigation = false;
+    var finalUrl = action;
+    
+    // Check if already proxied or external
+    if (isAlreadyProxied(action)) {
+      needsTopNavigation = true;
+      finalUrl = action;
+    } else if (isExternalUrl(action)) {
+      needsTopNavigation = true;
+      finalUrl = toProxyUrl(action);
+    }
+    
+    if (needsTopNavigation) {
+      console.log('[Proxy:AdFrame] Intercepting form submit, navigating TOP:', finalUrl.substring(0, 60));
+      e.preventDefault();
+      e.stopPropagation();
+      
+      // Navigate TOP window instead of submitting form in iframe
+      try {
+        if (window.top && window.top !== window) {
+          window.top.location.href = finalUrl;
+        } else if (window.parent && window.parent !== window) {
+          window.parent.location.href = finalUrl;
+        } else {
+          __realLocation__.href = finalUrl;
+        }
+      } catch(err) {
+        form.action = finalUrl;
+        form.target = '_top'; // Fallback: set target to top
+      }
     }
   }, true);
   
@@ -1502,17 +1561,13 @@ function processGoogleAdHtml(html, pageUrl) {
   }
   
   // ═══════════════════════════════════════════════════════════
-  // MODIFY TARGET ATTRIBUTES TO PREVENT TOP NAVIGATION
-  // Change target="_top" and target="_blank" to target="_self" 
-  // so clicks stay in the proxied context
+  // CRITICAL FIX: DO NOT CHANGE TARGET ATTRIBUTES!
+  // Previously we changed target="_top" to "_self" which caused
+  // advertiser landing pages to open INSIDE the small ad iframe.
+  // Now we let the click handler in getAdIframeInterceptScript()
+  // intercept ALL clicks and navigate the TOP window through proxy.
   // ═══════════════════════════════════════════════════════════
-  $('a[target="_top"], a[target="_blank"], a[target="_parent"]').each((i, elem) => {
-    $(elem).attr('target', '_self');
-  });
-  
-  $('form[target="_top"], form[target="_blank"], form[target="_parent"]').each((i, elem) => {
-    $(elem).attr('target', '_self');
-  });
+  // REMOVED: target="_self" modification - was causing iframe issue
   
   // ═══════════════════════════════════════════════════════════
   // REWRITE URL ATTRIBUTES
