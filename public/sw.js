@@ -12,8 +12,8 @@
  */
 
 // FORCE UPDATE: Version with timestamp to bypass browser cache
-const SW_VERSION = 'v7-2024-12-12-bulletproof';
-const CACHE_NAME = 'proxy-poc-v7-' + Date.now();
+const SW_VERSION = 'v8-2024-12-13-all-navigations-proxied';
+const CACHE_NAME = 'proxy-poc-v8-' + Date.now();
 
 // Google ad domains that MUST be proxied
 const GOOGLE_AD_DOMAINS = [
@@ -233,90 +233,60 @@ self.addEventListener('fetch', (event) => {
   // ═══════════════════════════════════════════════════════════
   // STEP 3: PROXY ALL EXTERNAL URLs - This is the CRITICAL part
   // Any URL that's not from our origin MUST go through proxy
+  // 
+  // IMPORTANT FIX (v8): ALL navigations to external URLs must
+  // REDIRECT to proxy URL (not just proxy inline). This ensures:
+  // 1. Browser URL bar shows proxy URL
+  // 2. Service Worker maintains control
+  // 3. User IP stays hidden for ALL requests
   // ═══════════════════════════════════════════════════════════
   if (isExternalUrl(url)) {
     
     // ═══════════════════════════════════════════════════════════
-    // BULLETPROOF FIX: Check for Google Ad URLs FIRST
-    // These MUST ALWAYS be proxied, never redirected
+    // STEP 3a: Handle NAVIGATE mode FIRST - This is for link clicks,
+    // form submissions, and JavaScript navigations (window.location)
+    // 
+    // CRITICAL: ALL navigations must REDIRECT to proxy URL!
+    // This keeps the browser URL bar showing our proxy domain
+    // and allows SW to control ALL subsequent requests.
     // ═══════════════════════════════════════════════════════════
-    if (isGoogleAdUrl(url)) {
-      console.log(`[SW ${SW_VERSION}] 🎯 GOOGLE AD URL DETECTED - FORCING PROXY:`, url.substring(0, 100));
-      event.respondWith(handleExternalResource(event, url));
-      return;
-    }
-    
-    // ═══════════════════════════════════════════════════════════
-    // CRITICAL FIX: Check iframe destination FIRST before anything else
-    // Google Ad iframes have destination === 'iframe' with mode === 'navigate'
-    // We MUST proxy them, not redirect them!
-    // ═══════════════════════════════════════════════════════════
-    if (destination === 'iframe') {
-      console.log(`[SW ${SW_VERSION}] 🎯 IFRAME DETECTED (dest=iframe, mode=${mode}) - FORCING PROXY:`, url.substring(0, 100));
-      event.respondWith(handleExternalResource(event, url));
-      return;
-    }
-    
-    // ═══════════════════════════════════════════════════════════
-    // BULLETPROOF FIX: Handle document destination with navigate mode
-    // This could be a nested iframe navigation - check referrer
-    // ═══════════════════════════════════════════════════════════
-    if (destination === 'document' && mode === 'navigate') {
-      const referrer = request.referrer;
-      // If referrer is from our proxy domain, this is likely an iframe navigation
-      if (referrer && referrer.includes(self.location.origin)) {
-        console.log(`[SW ${SW_VERSION}] 🎯 NESTED DOCUMENT NAVIGATION (from proxy) - PROXYING:`, url.substring(0, 100));
+    if (mode === 'navigate') {
+      // For iframe navigations (destination === 'iframe'), we can proxy inline
+      // because the parent page still controls the iframe content
+      if (destination === 'iframe') {
+        console.log(`[SW V8] 🎯 IFRAME NAVIGATION - PROXYING INLINE:`, url.substring(0, 100));
         event.respondWith(handleExternalResource(event, url));
         return;
       }
-    }
-    
-    // Also catch iframes with empty destination (some browsers)
-    if (destination === '' && (mode === 'no-cors' || mode === 'cors' || mode === 'same-origin')) {
-      console.log(`[SW ${SW_VERSION}] 🎯 RESOURCE DETECTED (dest='', mode=${mode}) - FORCING PROXY:`, url.substring(0, 100));
-      event.respondWith(handleExternalResource(event, url));
-      return;
-    }
-    
-    // ═══════════════════════════════════════════════════════════
-    // Handle empty destination with navigate mode - could be iframe
-    // ═══════════════════════════════════════════════════════════
-    if (destination === '' && mode === 'navigate') {
-      // Check if this looks like it's from an ad context
-      const referrer = request.referrer;
-      if (referrer && (referrer.includes('/p/') || referrer.includes('googlesyndication') || referrer.includes('doubleclick'))) {
-        console.log(`[SW ${SW_VERSION}] 🎯 NAVIGATE WITH EMPTY DEST (ad context) - PROXYING:`, url.substring(0, 100));
-        event.respondWith(handleExternalResource(event, url));
-        return;
-      }
-    }
-    
-    // Determine if this is a top-level navigation (NOT iframe navigation)
-    // Navigation = user clicking a link or typing in address bar
-    // At this point, we've already handled iframe navigations above
-    const isNavigation = mode === 'navigate';
-    
-    // For TOP-LEVEL navigations only, we REDIRECT so the URL bar shows the proxy URL
-    // This includes:
-    // - User clicking external links
-    // - Ad click URLs (which redirect to advertiser sites)
-    // - Form submissions to external URLs
-    if (isNavigation) {
-      console.log(`[SW ${SW_VERSION}] 🔄 TOP-LEVEL NAVIGATION - REDIRECTING:`, url.substring(0, 100));
+      
+      // For ALL other navigations (document, empty), REDIRECT to proxy URL
+      // This is CRITICAL for:
+      // - Ad clicks (Google Ads, Native Ads, ANY ad network)
+      // - External link clicks
+      // - JavaScript redirects (window.location.href = "...")
+      // - Form submissions
+      console.log(`[SW V8] 🔄 NAVIGATION TO EXTERNAL URL - REDIRECTING TO PROXY:`, url.substring(0, 100));
       const proxyUrl = externalToProxyUrl(url);
       event.respondWith(Response.redirect(proxyUrl, 302));
       return;
     }
     
-    // For ALL other external requests, we FETCH through proxy
-    // This includes (but not limited to):
-    // - Scripts
-    // - Stylesheets  
-    // - Images
-    // - Fonts
-    // - XHR/Fetch requests
-    // - Web sockets (where possible)
-    console.log(`[SW ${SW_VERSION}] 📡 PROXY EXTERNAL (dest=${destination}, mode=${mode}):`, url.substring(0, 80));
+    // ═══════════════════════════════════════════════════════════
+    // STEP 3b: Handle Google Ad URLs specially
+    // These need to be proxied to ensure ads load properly
+    // ═══════════════════════════════════════════════════════════
+    if (isGoogleAdUrl(url)) {
+      console.log(`[SW V8] 🎯 GOOGLE AD RESOURCE - PROXYING:`, url.substring(0, 100));
+      event.respondWith(handleExternalResource(event, url));
+      return;
+    }
+    
+    // ═══════════════════════════════════════════════════════════
+    // STEP 3c: Handle all other external resources
+    // (scripts, stylesheets, images, fonts, XHR, fetch, etc.)
+    // These are proxied inline since they don't change the page URL
+    // ═══════════════════════════════════════════════════════════
+    console.log(`[SW V8] 📡 EXTERNAL RESOURCE (dest=${destination}, mode=${mode}) - PROXYING:`, url.substring(0, 80));
     event.respondWith(handleExternalResource(event, url));
     return;
   }
