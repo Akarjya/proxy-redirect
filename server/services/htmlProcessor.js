@@ -1014,6 +1014,14 @@ function processHtml(html, pageUrl, options = {}) {
   baseTag.remove();
   
   // ═══════════════════════════════════════════════════════════
+  // CRITICAL: REMOVE CSP META TAGS
+  // CSP meta tags block dynamic script loading (needed for Google Ads)
+  // ═══════════════════════════════════════════════════════════
+  $('meta[http-equiv="Content-Security-Policy"]').remove();
+  $('meta[http-equiv="content-security-policy"]').remove();
+  console.log('[htmlProcessor] CSP meta tags removed');
+  
+  // ═══════════════════════════════════════════════════════════
   // INJECT SCRIPTS AT THE START OF <head>
   // ═══════════════════════════════════════════════════════════
   let head = $('head');
@@ -1461,6 +1469,12 @@ function processGoogleAdHtml(html, pageUrl) {
   
   // Use page URL as base
   const baseUrl = pageUrl;
+  
+  // ═══════════════════════════════════════════════════════════
+  // CRITICAL: REMOVE CSP META TAGS FROM AD CONTENT
+  // ═══════════════════════════════════════════════════════════
+  $('meta[http-equiv="Content-Security-Policy"]').remove();
+  $('meta[http-equiv="content-security-policy"]').remove();
   
   // ═══════════════════════════════════════════════════════════
   // INJECT INTERCEPTION SCRIPT AT THE VERY START
