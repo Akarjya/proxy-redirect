@@ -108,6 +108,52 @@ app.get('/', (req, res) => {
 app.use('/assets', express.static(path.join(publicPath, 'assets')));
 
 // ═══════════════════════════════════════════════════════════════════════
+// CLOUDFLARE CHALLENGE PATHS - MUST BE BEFORE API ROUTES
+// Handle Cloudflare JS challenge validation by proxying to target site
+// ═══════════════════════════════════════════════════════════════════════
+
+app.all('/hcdn-cgi/*', async (req, res) => {
+  const base64Url = require('./utils/base64Url');
+  const contentFetcher = require('./services/contentFetcher');
+  const sessionManager = require('./services/sessionManager');
+  
+  // Build target URL (Cloudflare path on target site)
+  const targetUrl = `${TARGET_SITE}${req.originalUrl}`;
+  logger.debug(`Cloudflare challenge proxy: ${req.method} ${targetUrl}`);
+  
+  try {
+    // Get or create session
+    let sessionId = req.cookies['proxy_session'];
+    if (!sessionId) {
+      sessionId = sessionManager.createSession().id;
+      res.cookie('proxy_session', sessionId, { 
+        httpOnly: true, 
+        secure: true, 
+        sameSite: 'Lax',
+        maxAge: 2 * 60 * 60 * 1000 
+      });
+    }
+    const session = sessionManager.getSession(sessionId);
+    
+    // Forward the request to target site
+    const result = await contentFetcher.fetchText(targetUrl, session, req.method, req.body);
+    
+    // Forward response headers (except problematic ones)
+    const blockedHeaders = ['content-security-policy', 'x-frame-options', 'transfer-encoding', 'content-encoding'];
+    for (const [key, value] of Object.entries(result.response.headers.raw ? result.response.headers.raw() : {})) {
+      if (!blockedHeaders.includes(key.toLowerCase())) {
+        res.set(key, Array.isArray(value) ? value[0] : value);
+      }
+    }
+    
+    res.send(result.text);
+  } catch (error) {
+    logger.error('Cloudflare challenge proxy error', { error: error.message });
+    res.status(502).json({ error: 'Cloudflare challenge proxy failed' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
 // API ROUTES
 // ═══════════════════════════════════════════════════════════════════════
 
