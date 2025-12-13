@@ -1238,7 +1238,65 @@ function getAdIframeInterceptScript() {
   // This is the main interception for ad clicks
   // IMPORTANT: Must handle BOTH external URLs AND proxied URLs
   // because ad links are rewritten to /p/xxx format
+  // 
+  // ALSO: Handles URL shortening for very long URLs (Google Ads)
+  // that exceed browser path length limits (~2000 chars)
   // ═══════════════════════════════════════════════════════════
+  
+  // Max URL path length before shortening is needed
+  var MAX_PATH_LENGTH = 1500;
+  
+  // Navigate top window helper (handles cross-origin)
+  function navigateTopWindow(url) {
+    console.log('[Proxy:AdFrame] Navigating TOP window to:', url.substring(0, 80));
+    try {
+      if (window.top && window.top !== window) {
+        window.top.location.href = url;
+      } else if (window.parent && window.parent !== window) {
+        window.parent.location.href = url;
+      } else {
+        __realLocation__.href = url;
+      }
+    } catch(err) {
+      console.log('[Proxy:AdFrame] Cross-origin detected, trying alternative:', err.message);
+      try {
+        window.parent.location.href = url;
+      } catch(e2) {
+        __realLocation__.href = url;
+      }
+    }
+  }
+  
+  // Shorten URL via API if too long
+  function shortenAndNavigate(fullUrl) {
+    console.log('[Proxy:AdFrame] URL too long (' + fullUrl.length + ' chars), shortening...');
+    
+    // Make sync XHR to shorten URL (blocking is OK here - it's a click action)
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/shorten', false); // synchronous
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    
+    try {
+      xhr.send(JSON.stringify({ url: fullUrl }));
+      
+      if (xhr.status === 200) {
+        var response = JSON.parse(xhr.responseText);
+        if (response.success && response.shortUrl) {
+          console.log('[Proxy:AdFrame] URL shortened to:', response.shortUrl);
+          navigateTopWindow(response.shortUrl);
+          return true;
+        }
+      }
+    } catch(err) {
+      console.error('[Proxy:AdFrame] URL shortening failed:', err.message);
+    }
+    
+    // Fallback: try original URL anyway
+    console.log('[Proxy:AdFrame] Shortening failed, trying original URL');
+    navigateTopWindow(toProxyUrl(fullUrl));
+    return false;
+  }
+  
   function handleClick(e) {
     var target = e.target;
     
@@ -1266,16 +1324,33 @@ function getAdIframeInterceptScript() {
     // Determine if this needs TOP window navigation
     var needsTopNavigation = false;
     var finalUrl = href;
+    var originalExternalUrl = null; // For URL shortening
     
     // CASE 1: Already a proxied URL (/p/xxx) - navigate TOP window to this URL
     if (isAlreadyProxied(href)) {
       needsTopNavigation = true;
       finalUrl = href;
       console.log('[Proxy:AdFrame] Intercepting proxied link click:', href.substring(0, 60));
+      
+      // Check if this proxied URL is too long (needs shortening)
+      if (href.length > MAX_PATH_LENGTH) {
+        // Extract the original URL from the proxy path for shortening
+        try {
+          var urlObj = new URL(href);
+          var encoded = urlObj.pathname.replace(/^\\/p\\//, '');
+          var base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+          while (base64.length % 4) base64 += '=';
+          originalExternalUrl = decodeURIComponent(escape(atob(base64)));
+          console.log('[Proxy:AdFrame] Decoded long URL for shortening, length:', originalExternalUrl.length);
+        } catch(decodeErr) {
+          console.log('[Proxy:AdFrame] Could not decode URL for shortening');
+        }
+      }
     }
     // CASE 2: External URL - convert to proxy and navigate TOP window
     else if (isExternalUrl(href)) {
       needsTopNavigation = true;
+      originalExternalUrl = href;
       finalUrl = toProxyUrl(href);
       console.log('[Proxy:AdFrame] Intercepting external link click:', href.substring(0, 60));
     }
@@ -1286,28 +1361,12 @@ function getAdIframeInterceptScript() {
       e.stopPropagation();
       e.stopImmediatePropagation();
       
-      console.log('[Proxy:AdFrame] Navigating TOP window to:', finalUrl.substring(0, 80));
-      
-      // CRITICAL: Always navigate the TOP window, not the iframe!
-      // This ensures advertiser landing page opens in FULL PAGE, not tiny ad space
-      try {
-        if (window.top && window.top !== window) {
-          window.top.location.href = finalUrl;
-        } else if (window.parent && window.parent !== window) {
-          window.parent.location.href = finalUrl;
-        } else {
-          // Fallback: we ARE the top window
-          __realLocation__.href = finalUrl;
-        }
-      } catch(err) {
-        // Cross-origin restriction - try parent, then current window
-        console.log('[Proxy:AdFrame] Cross-origin detected, trying alternative:', err.message);
-        try {
-          window.parent.location.href = finalUrl;
-        } catch(e2) {
-          // Last resort: navigate current window (will still be in iframe, but at least works)
-          __realLocation__.href = finalUrl;
-        }
+      // Check if URL is too long and needs shortening
+      if (originalExternalUrl && originalExternalUrl.length > MAX_PATH_LENGTH) {
+        shortenAndNavigate(originalExternalUrl);
+      } else {
+        // CRITICAL: Always navigate the TOP window, not the iframe!
+        navigateTopWindow(finalUrl);
       }
       
       return false;

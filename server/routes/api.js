@@ -8,6 +8,7 @@ const express = require('express');
 const router = express.Router();
 const sessionManager = require('../services/sessionManager');
 const proxyPool = require('../services/proxyPool');
+const urlShortener = require('../services/urlShortener');
 const logger = require('../utils/logger');
 
 const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME || 'proxy_session';
@@ -114,6 +115,45 @@ router.get('/status', (req, res) => {
  */
 router.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+/**
+ * POST /api/shorten - Store a long URL and return short hash
+ * Used for URLs that exceed browser path length limits (Google Ads tracking URLs)
+ */
+router.post('/shorten', express.json(), (req, res) => {
+  try {
+    const { url } = req.body;
+    
+    if (!url) {
+      return res.status(400).json({ error: 'URL is required' });
+    }
+    
+    // Store URL and get hash
+    const hash = urlShortener.storeUrl(url);
+    
+    logger.info('URL shortened', { 
+      hash, 
+      originalLength: url.length 
+    });
+    
+    res.json({
+      success: true,
+      hash: hash,
+      shortUrl: `/p/s/${hash}`
+    });
+    
+  } catch (error) {
+    logger.error('URL shortening error', { error: error.message });
+    res.status(500).json({ error: 'Failed to shorten URL' });
+  }
+});
+
+/**
+ * GET /api/url-stats - Get URL shortener stats (for debugging)
+ */
+router.get('/url-stats', (req, res) => {
+  res.json(urlShortener.getStats());
 });
 
 module.exports = router;

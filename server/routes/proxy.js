@@ -14,6 +14,7 @@ const contentFetcher = require('../services/contentFetcher');
 const htmlProcessor = require('../services/htmlProcessor');
 const cssProcessor = require('../services/cssProcessor');
 const jsProcessor = require('../services/jsProcessor');
+const urlShortener = require('../services/urlShortener');
 const logger = require('../utils/logger');
 
 const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME || 'proxy_session';
@@ -327,6 +328,35 @@ router.post('/proxy', async (req, res) => {
 });
 
 /**
+ * GET /p/s/:hash - Short URL proxy path (for long URLs that exceed path limits)
+ * This handles URLs that were shortened via /api/shorten
+ */
+router.get('/p/s/:hash', async (req, res) => {
+  const hash = req.params.hash;
+  
+  if (!hash) {
+    return res.status(400).json({ error: 'Missing URL hash' });
+  }
+  
+  // Lookup full URL from hash
+  const fullUrl = urlShortener.getUrl(hash);
+  
+  if (!fullUrl) {
+    logger.warn('Short URL not found or expired', { hash });
+    return res.status(404).json({ 
+      error: 'URL not found or expired',
+      message: 'The short URL may have expired. Please go back and try again.'
+    });
+  }
+  
+  logger.info('Short URL resolved', { hash, urlPreview: fullUrl.substring(0, 60) });
+  
+  // Encode the full URL and redirect to proxy
+  const encodedUrl = base64Url.encode(fullUrl);
+  res.redirect(`/api/proxy?url=${encodeURIComponent(encodedUrl)}`);
+});
+
+/**
  * GET /p/:encoded - Direct proxy path (fallback for non-SW requests)
  */
 router.get('/p/:encoded(*)', async (req, res) => {
@@ -334,6 +364,17 @@ router.get('/p/:encoded(*)', async (req, res) => {
   
   if (!encodedUrl) {
     return res.status(400).send('Missing encoded URL');
+  }
+  
+  // Check if it's a short URL format (starts with 's/')
+  if (encodedUrl.startsWith('s/')) {
+    const hash = encodedUrl.substring(2);
+    const fullUrl = urlShortener.getUrl(hash);
+    
+    if (fullUrl) {
+      const encoded = base64Url.encode(fullUrl);
+      return res.redirect(`/api/proxy?url=${encodeURIComponent(encoded)}`);
+    }
   }
   
   // Redirect to API proxy endpoint
