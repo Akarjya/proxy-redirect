@@ -160,6 +160,79 @@ function rewriteSrcset(srcset, baseUrl) {
 }
 
 /**
+ * Rewrite JavaScript redirect URLs in inline script content
+ * This handles tracking pages that use JS redirects instead of HTTP redirects
+ * 
+ * Patterns matched:
+ * - window.location.href = "https://..."
+ * - window.location = "https://..."
+ * - location.href = "https://..."
+ * - location = "https://..."
+ * - self.location.href = "https://..."
+ * - document.location.href = "https://..."
+ * - top.location.href = "https://..."
+ * 
+ * @param {string} scriptContent - JavaScript code
+ * @param {string} baseUrl - Base URL for resolving relative URLs
+ * @returns {string} - Rewritten script content
+ */
+function rewriteJsRedirects(scriptContent, baseUrl) {
+  if (!scriptContent) return scriptContent;
+  
+  // Regex to match location assignments with URL strings
+  // Captures: 1=location object, 2=.href (optional), 3=quote type, 4=URL
+  const patterns = [
+    // window.location.href = "url" or window.location = "url"
+    /(\b(?:window|self|document|top|parent)\.location)(\.href)?\s*=\s*(['"])(https?:\/\/[^'"]+)\3/gi,
+    // location.href = "url" or location = "url" (without prefix)
+    /(\blocation)(\.href)?\s*=\s*(['"])(https?:\/\/[^'"]+)\3/gi,
+  ];
+  
+  let rewritten = scriptContent;
+  
+  for (const pattern of patterns) {
+    rewritten = rewritten.replace(pattern, (match, locObj, hrefPart, quote, url) => {
+      // Check if URL is external (not our proxy domain)
+      if (url && url.startsWith('http') && !url.includes('/p/')) {
+        try {
+          const proxyUrl = toProxyUrl(url, baseUrl);
+          const newAssignment = `${locObj}${hrefPart || ''}=${quote}${proxyUrl}${quote}`;
+          console.log('[htmlProcessor] Rewriting JS redirect:', url.substring(0, 50), '->', proxyUrl.substring(0, 50));
+          return newAssignment;
+        } catch (e) {
+          console.warn('[htmlProcessor] Failed to rewrite JS redirect:', url, e.message);
+          return match;
+        }
+      }
+      return match;
+    });
+  }
+  
+  // Also handle location.replace("url") and location.assign("url")
+  const methodPatterns = [
+    /(\b(?:window|self|document|top|parent)\.location|location)\.(replace|assign)\((['"])(https?:\/\/[^'"]+)\3\)/gi,
+  ];
+  
+  for (const pattern of methodPatterns) {
+    rewritten = rewritten.replace(pattern, (match, locObj, method, quote, url) => {
+      if (url && url.startsWith('http') && !url.includes('/p/')) {
+        try {
+          const proxyUrl = toProxyUrl(url, baseUrl);
+          const newCall = `${locObj}.${method}(${quote}${proxyUrl}${quote})`;
+          console.log('[htmlProcessor] Rewriting JS redirect method:', url.substring(0, 50));
+          return newCall;
+        } catch (e) {
+          return match;
+        }
+      }
+      return match;
+    });
+  }
+  
+  return rewritten;
+}
+
+/**
  * Get WebRTC blocking script content
  * @returns {string}
  */
@@ -1109,6 +1182,28 @@ function processHtml(html, pageUrl, options = {}) {
     }
   });
   
+  // ═══════════════════════════════════════════════════════════
+  // REWRITE INLINE SCRIPT REDIRECTS
+  // This catches tracking pages that use JavaScript redirects
+  // like: window.location.href = "https://advertiser.com/..."
+  // ═══════════════════════════════════════════════════════════
+  $('script:not([src])').each((i, elem) => {
+    const $elem = $(elem);
+    const scriptContent = $elem.html();
+    if (scriptContent) {
+      // Only process scripts that might contain redirects
+      // (looking for location assignments with http URLs)
+      if (scriptContent.includes('location') && 
+          (scriptContent.includes('http://') || scriptContent.includes('https://'))) {
+        const rewritten = rewriteJsRedirects(scriptContent, baseUrl);
+        if (rewritten !== scriptContent) {
+          $elem.html(rewritten);
+          console.log('[htmlProcessor] Rewrote JS redirects in inline script');
+        }
+      }
+    }
+  });
+  
   return $.html();
 }
 
@@ -1762,6 +1857,24 @@ function processGoogleAdHtml(html, pageUrl) {
     }
   });
   
+  // ═══════════════════════════════════════════════════════════
+  // REWRITE INLINE SCRIPT REDIRECTS (for tracking pages)
+  // ═══════════════════════════════════════════════════════════
+  $('script:not([src])').each((i, elem) => {
+    const $elem = $(elem);
+    const scriptContent = $elem.html();
+    if (scriptContent) {
+      if (scriptContent.includes('location') && 
+          (scriptContent.includes('http://') || scriptContent.includes('https://'))) {
+        const rewritten = rewriteJsRedirects(scriptContent, baseUrl);
+        if (rewritten !== scriptContent) {
+          $elem.html(rewritten);
+          console.log('[htmlProcessor] Rewrote JS redirects in Google Ad inline script');
+        }
+      }
+    }
+  });
+  
   return $.html();
 }
 
@@ -1772,6 +1885,7 @@ module.exports = {
   toProxyUrl,
   shouldSkipUrl,
   rewriteSrcset,
+  rewriteJsRedirects,
   getWebRtcBlockScript,
   getFetchOverrideScript,
   getAdIframeInterceptScript
