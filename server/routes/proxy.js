@@ -232,16 +232,8 @@ router.get('/proxy', async (req, res) => {
         responseBody = htmlProcessor.processHtml(responseBody, targetUrl);
       }
       res.set('Content-Type', 'text/html; charset=utf-8');
-      
-      // ═══════════════════════════════════════════════════════════
-      // CSP SAFETY NET - Block direct external iframes ONLY
-      // Allow all scripts to load (needed for Google Ads)
-      // Only restrict frame-src to force iframes through proxy
-      // ═══════════════════════════════════════════════════════════
-      res.set('Content-Security-Policy', 
-        "frame-src 'self' blob: data:; " +
-        "frame-ancestors *;"
-      );
+      // NOTE: CSP removed - it interferes with Google Ads dynamic script loading
+      // Protection is handled by Service Worker + JS overrides instead
       
     } else if (category === 'css') {
       responseBody = cssProcessor.processCss(responseBody, targetUrl);
