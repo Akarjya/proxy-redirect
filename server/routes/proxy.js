@@ -232,8 +232,14 @@ router.get('/proxy', async (req, res) => {
         responseBody = htmlProcessor.processHtml(responseBody, targetUrl);
       }
       res.set('Content-Type', 'text/html; charset=utf-8');
-      // NOTE: CSP removed - it interferes with Google Ads dynamic script loading
-      // Protection is handled by Service Worker + JS overrides instead
+      // EXPLICITLY set permissive CSP to OVERRIDE any existing CSP
+      // This ensures Google Ads scripts can load dynamically
+      res.set('Content-Security-Policy', 
+        "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; " +
+        "script-src * 'unsafe-inline' 'unsafe-eval' data: blob:; " +
+        "frame-src * data: blob:; " +
+        "frame-ancestors *;"
+      );
       
     } else if (category === 'css') {
       responseBody = cssProcessor.processCss(responseBody, targetUrl);
