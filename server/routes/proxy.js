@@ -3,6 +3,9 @@
  * 
  * Main proxy endpoint that fetches content through 922proxy.
  * Handles HTML/CSS processing, header management, and response streaming.
+ * 
+ * IMPORTANT: Binary content (images, fonts, etc.) is handled separately
+ * using fetchBuffer() to prevent corruption from text encoding.
  */
 
 const express = require('express');
@@ -43,6 +46,80 @@ const GOOGLE_AD_URL_PATTERNS = [
   '/pagead/'
 ];
 
+// ═══════════════════════════════════════════════════════════
+// BINARY CONTENT DETECTION
+// These extensions and content types MUST be handled as binary
+// to prevent corruption from text encoding
+// ═══════════════════════════════════════════════════════════
+
+// File extensions that are always binary
+const BINARY_EXTENSIONS = [
+  // Images
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.ico', '.bmp', '.tiff', '.tif',
+  '.svg', // SVG can be text but often served with binary content-type
+  // Fonts
+  '.woff', '.woff2', '.ttf', '.otf', '.eot',
+  // Audio
+  '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac',
+  // Video
+  '.mp4', '.webm', '.avi', '.mov', '.mkv', '.m4v',
+  // Documents
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+  // Archives
+  '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2',
+  // Other binary
+  '.wasm', '.bin', '.exe', '.dll', '.so', '.dylib'
+];
+
+// Content-Type patterns that indicate binary content
+const BINARY_CONTENT_TYPES = [
+  'image/',           // All image types
+  'audio/',           // All audio types
+  'video/',           // All video types
+  'font/',            // All font types
+  'application/font', // Font variants
+  'application/octet-stream',
+  'application/pdf',
+  'application/zip',
+  'application/x-zip',
+  'application/gzip',
+  'application/x-gzip',
+  'application/wasm',
+  'application/vnd.',  // Vendor-specific (usually binary)
+  'application/x-font',
+  'application/x-woff'
+];
+
+/**
+ * Check if URL likely points to binary content based on extension
+ * @param {string} url - URL to check
+ * @returns {boolean}
+ */
+function isBinaryUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    const pathname = urlObj.pathname.toLowerCase();
+    
+    // Check if URL ends with a binary extension
+    return BINARY_EXTENSIONS.some(ext => pathname.endsWith(ext));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if content-type indicates binary content
+ * @param {string} contentType - Content-Type header value
+ * @returns {boolean}
+ */
+function isBinaryContentType(contentType) {
+  if (!contentType) return false;
+  
+  const lower = contentType.toLowerCase();
+  
+  return BINARY_CONTENT_TYPES.some(pattern => lower.includes(pattern));
+}
+
 /**
  * Check if URL is from Google ad domain or matches ad URL patterns
  */
@@ -71,13 +148,19 @@ function isGoogleAdDomain(url) {
 }
 
 /**
- * Determine content type category
+ * Determine content type category for processing
+ * @param {string} contentType - Content-Type header value
+ * @returns {string} - 'html', 'css', 'js', 'text', 'json', 'xml', or 'binary'
  */
 function getContentTypeCategory(contentType) {
   if (!contentType) return 'binary';
   
   const lower = contentType.toLowerCase();
   
+  // Check binary types FIRST (most important for preventing corruption)
+  if (isBinaryContentType(contentType)) return 'binary';
+  
+  // Then check text types
   if (lower.includes('text/html')) return 'html';
   if (lower.includes('text/css')) return 'css';
   if (lower.includes('javascript') || lower.includes('ecmascript')) return 'js';
@@ -85,6 +168,7 @@ function getContentTypeCategory(contentType) {
   if (lower.includes('application/json')) return 'json';
   if (lower.includes('application/xml') || lower.includes('text/xml')) return 'xml';
   
+  // Default to binary for safety (prevents text corruption)
   return 'binary';
 }
 
@@ -146,7 +230,18 @@ router.get('/proxy', async (req, res) => {
       });
     }
     
-    logger.info('Starting proxy fetch', { url: targetUrl.substring(0, 60), isAd: isAdRequest });
+    // ═══════════════════════════════════════════════════════════
+    // PRE-DETECT BINARY CONTENT
+    // Check URL extension to determine if we should fetch as binary
+    // This prevents corruption from text encoding
+    // ═══════════════════════════════════════════════════════════
+    const likelyBinary = isBinaryUrl(targetUrl);
+    
+    logger.info('Starting proxy fetch', { 
+      url: targetUrl.substring(0, 60), 
+      isAd: isAdRequest,
+      likelyBinary: likelyBinary
+    });
     
     // Build options from request headers
     const options = {
@@ -160,8 +255,59 @@ router.get('/proxy', async (req, res) => {
       }
     };
     
-    // Fetch through proxy
-    logger.debug('Fetching through proxy...');
+    // ═══════════════════════════════════════════════════════════
+    // FETCH CONTENT - Use appropriate method based on content type
+    // Binary: fetchBuffer() to prevent corruption
+    // Text: fetchText() for processing
+    // ═══════════════════════════════════════════════════════════
+    
+    if (likelyBinary) {
+      // BINARY PATH: Fetch as buffer, send directly
+      logger.debug('Fetching as BINARY (based on URL extension)...');
+      const result = await contentFetcher.fetchBuffer(targetUrl, options, session);
+      
+      // Handle redirects
+      if (result.isRedirect && result.redirectUrl) {
+        const redirectProxyUrl = base64Url.toProxyPath(result.redirectUrl);
+        return res.redirect(result.response.status, redirectProxyUrl);
+      }
+      
+      // Set response status
+      res.status(result.response.status);
+      
+      // Forward content-type and caching headers
+      const contentType = result.response.headers.get('content-type');
+      if (contentType) {
+        res.set('Content-Type', contentType);
+      }
+      
+      const cacheControl = result.response.headers.get('cache-control');
+      if (cacheControl) {
+        res.set('Cache-Control', cacheControl);
+      }
+      
+      const etag = result.response.headers.get('etag');
+      if (etag) {
+        res.set('ETag', etag);
+      }
+      
+      const lastModified = result.response.headers.get('last-modified');
+      if (lastModified) {
+        res.set('Last-Modified', lastModified);
+      }
+      
+      // Send binary buffer directly WITHOUT any processing
+      logger.info('Binary content served', { 
+        url: targetUrl.substring(0, 50),
+        contentType: contentType,
+        size: result.buffer?.length
+      });
+      
+      return res.send(result.buffer);
+    }
+    
+    // TEXT PATH: Fetch as text for processing
+    logger.debug('Fetching as TEXT...');
     const result = await contentFetcher.fetchText(targetUrl, options, session);
     logger.info('Fetch completed', { status: result.response?.status });
     
@@ -171,9 +317,44 @@ router.get('/proxy', async (req, res) => {
       return res.redirect(result.response.status, redirectProxyUrl);
     }
     
-    // Get content type
+    // Get content type from response
     const contentType = result.response.headers.get('content-type') || '';
     const category = getContentTypeCategory(contentType);
+    
+    // ═══════════════════════════════════════════════════════════
+    // SECOND CHECK: If response is binary but URL didn't indicate it
+    // Re-fetch as buffer to prevent corruption
+    // ═══════════════════════════════════════════════════════════
+    if (category === 'binary') {
+      logger.info('Response is BINARY (detected from content-type), re-fetching as buffer...', {
+        url: targetUrl.substring(0, 50),
+        contentType: contentType
+      });
+      
+      // Re-fetch as buffer
+      const binaryResult = await contentFetcher.fetchBuffer(targetUrl, options, session);
+      
+      if (binaryResult.isRedirect && binaryResult.redirectUrl) {
+        const redirectProxyUrl = base64Url.toProxyPath(binaryResult.redirectUrl);
+        return res.redirect(binaryResult.response.status, redirectProxyUrl);
+      }
+      
+      res.status(binaryResult.response.status);
+      res.set('Content-Type', contentType);
+      
+      const cacheControl = binaryResult.response.headers.get('cache-control');
+      if (cacheControl) res.set('Cache-Control', cacheControl);
+      
+      const etag = binaryResult.response.headers.get('etag');
+      if (etag) res.set('ETag', etag);
+      
+      logger.info('Binary content served (re-fetched)', { 
+        url: targetUrl.substring(0, 50),
+        size: binaryResult.buffer?.length
+      });
+      
+      return res.send(binaryResult.buffer);
+    }
     
     // Update session with current page (for HTML pages)
     if (category === 'html') {
@@ -217,9 +398,6 @@ router.get('/proxy', async (req, res) => {
         url: targetUrl.substring(0, 50),
         csp: csp.substring(0, 100) + '...'
       });
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/0340e72d-1340-460d-ba20-9cf1a26cf9a8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'proxy.js:cspBlock',message:'CSP header blocked',data:{url:targetUrl.substring(0,60),csp:csp.substring(0,80)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H3-CSP-BLOCK'})}).catch(()=>{});
-      // #endregion
     }
     
     // Process content based on type
@@ -248,9 +426,6 @@ router.get('/proxy', async (req, res) => {
       
     } else if (category === 'js') {
       // Process JavaScript to rewrite external URLs
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/0340e72d-1340-460d-ba20-9cf1a26cf9a8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'proxy.js:jsProcess',message:'Processing JS file',data:{url:targetUrl.substring(0,60),size:responseBody?.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1-JS-REWRITE'})}).catch(()=>{});
-      // #endregion
       responseBody = jsProcessor.processJs(responseBody, targetUrl);
       res.set('Content-Type', 'application/javascript; charset=utf-8');
     }
@@ -273,6 +448,7 @@ router.get('/proxy', async (req, res) => {
 
 /**
  * POST /api/proxy - Handle POST requests through proxy
+ * Also handles binary responses properly
  */
 router.post('/proxy', async (req, res) => {
   const encodedUrl = req.query.url;
@@ -309,6 +485,25 @@ router.post('/proxy', async (req, res) => {
       body: req.body
     };
     
+    // Check if likely binary based on URL
+    const likelyBinary = isBinaryUrl(targetUrl);
+    
+    if (likelyBinary) {
+      // Fetch as buffer for binary content
+      const result = await contentFetcher.fetchBuffer(targetUrl, options, session);
+      
+      if (result.isRedirect && result.redirectUrl) {
+        const redirectProxyUrl = base64Url.toProxyPath(result.redirectUrl);
+        return res.redirect(result.response.status, redirectProxyUrl);
+      }
+      
+      const contentType = result.response.headers.get('content-type') || '';
+      res.set('Content-Type', contentType);
+      res.status(result.response.status);
+      return res.send(result.buffer);
+    }
+    
+    // Fetch as text for processing
     const result = await contentFetcher.fetchText(targetUrl, options, session);
     
     if (result.isRedirect && result.redirectUrl) {
@@ -317,6 +512,16 @@ router.post('/proxy', async (req, res) => {
     }
     
     const contentType = result.response.headers.get('content-type') || '';
+    const category = getContentTypeCategory(contentType);
+    
+    // If response is binary, re-fetch as buffer
+    if (category === 'binary') {
+      const binaryResult = await contentFetcher.fetchBuffer(targetUrl, options, session);
+      res.set('Content-Type', contentType);
+      res.status(binaryResult.response.status);
+      return res.send(binaryResult.buffer);
+    }
+    
     res.set('Content-Type', contentType);
     res.status(result.response.status);
     res.send(result.text);
