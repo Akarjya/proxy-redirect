@@ -1234,17 +1234,16 @@ function getAdIframeInterceptScript() {
   })();
   
   // ═══════════════════════════════════════════════════════════
-  // INTERCEPT ALL CLICK EVENTS - CRITICAL FIX!
-  // This is the main interception for ad clicks
-  // IMPORTANT: Must handle BOTH external URLs AND proxied URLs
-  // because ad links are rewritten to /p/xxx format
+  // INTERCEPT ALL CLICK EVENTS - ENHANCED CLICK BEACON SYSTEM
   // 
-  // ALSO: Handles URL shortening for very long URLs (Google Ads)
-  // that exceed browser path length limits (~2000 chars)
+  // For Google Ads clicks:
+  // 1. Send click to Google through proxy (registers click, hides IP)
+  // 2. Get final advertiser destination
+  // 3. Navigate to proxied advertiser page
+  // 
+  // All user data (cookies, headers) forwarded to Google
+  // Only IP is hidden via proxy
   // ═══════════════════════════════════════════════════════════
-  
-  // Max URL path length before shortening is needed
-  var MAX_PATH_LENGTH = 1500;
   
   // Navigate top window helper (handles cross-origin)
   function navigateTopWindow(url) {
@@ -1267,33 +1266,97 @@ function getAdIframeInterceptScript() {
     }
   }
   
-  // Shorten URL via API if too long
-  function shortenAndNavigate(fullUrl) {
-    console.log('[Proxy:AdFrame] URL too long (' + fullUrl.length + ' chars), shortening...');
+  // Check if URL is a Google Ads click URL
+  function isGoogleAdsClickUrl(url) {
+    try {
+      var hostname = new URL(url).hostname;
+      return hostname.includes('googleadservices.com') ||
+             hostname.includes('doubleclick.net') ||
+             hostname.includes('googlesyndication.com') ||
+             (hostname.includes('google') && url.includes('/aclk'));
+    } catch(e) {
+      return false;
+    }
+  }
+  
+  // Extract adurl parameter from Google Ads URL (fallback destination)
+  function extractAdurl(googleUrl) {
+    try {
+      var urlObj = new URL(googleUrl);
+      var adurl = urlObj.searchParams.get('adurl');
+      if (adurl) {
+        return decodeURIComponent(adurl);
+      }
+    } catch(e) {}
+    return null;
+  }
+  
+  // Decode proxied URL to get original
+  function decodeProxiedUrl(proxiedUrl) {
+    try {
+      var urlObj = new URL(proxiedUrl);
+      var encoded = urlObj.pathname.replace(/^\\/p\\//, '');
+      // Handle short URLs
+      if (encoded.startsWith('s/')) {
+        return null; // Can't decode short URLs client-side
+      }
+      var base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+      while (base64.length % 4) base64 += '=';
+      return decodeURIComponent(escape(atob(base64)));
+    } catch(e) {
+      return null;
+    }
+  }
+  
+  // Use click beacon API for Google Ads clicks
+  function handleGoogleAdsClick(googleClickUrl, fallbackAdurl) {
+    console.log('[Proxy:AdFrame] Processing Google Ads click via beacon...');
+    console.log('[Proxy:AdFrame] Click URL:', googleClickUrl.substring(0, 80));
     
-    // Make sync XHR to shorten URL (blocking is OK here - it's a click action)
+    // Gather all browser context to send with click
+    var browserContext = {
+      clickUrl: googleClickUrl,
+      cookies: document.cookie || '',
+      userAgent: navigator.userAgent,
+      referrer: document.referrer || '',
+      language: navigator.language || 'en-US',
+      adurl: fallbackAdurl
+    };
+    
+    // Make synchronous request to click beacon (blocking is OK for click)
     var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/shorten', false); // synchronous
+    xhr.open('POST', '/api/click-beacon', false);
     xhr.setRequestHeader('Content-Type', 'application/json');
     
     try {
-      xhr.send(JSON.stringify({ url: fullUrl }));
+      xhr.send(JSON.stringify(browserContext));
       
       if (xhr.status === 200) {
         var response = JSON.parse(xhr.responseText);
-        if (response.success && response.shortUrl) {
-          console.log('[Proxy:AdFrame] URL shortened to:', response.shortUrl);
-          navigateTopWindow(response.shortUrl);
+        
+        if (response.success && response.proxyUrl) {
+          console.log('[Proxy:AdFrame] Click beacon success!');
+          console.log('[Proxy:AdFrame] Click registered:', response.clickRegistered);
+          console.log('[Proxy:AdFrame] Destination:', response.destination.substring(0, 60));
+          
+          // Navigate to the proxied advertiser page
+          navigateTopWindow(response.proxyUrl);
           return true;
         }
       }
+      
+      console.warn('[Proxy:AdFrame] Click beacon returned:', xhr.status, xhr.responseText.substring(0, 100));
     } catch(err) {
-      console.error('[Proxy:AdFrame] URL shortening failed:', err.message);
+      console.error('[Proxy:AdFrame] Click beacon error:', err.message);
     }
     
-    // Fallback: try original URL anyway
-    console.log('[Proxy:AdFrame] Shortening failed, trying original URL');
-    navigateTopWindow(toProxyUrl(fullUrl));
+    // Fallback: If beacon fails but we have adurl, use it directly
+    if (fallbackAdurl) {
+      console.log('[Proxy:AdFrame] Using fallback adurl:', fallbackAdurl.substring(0, 60));
+      navigateTopWindow(toProxyUrl(fallbackAdurl));
+      return true;
+    }
+    
     return false;
   }
   
@@ -1321,54 +1384,60 @@ function getAdIframeInterceptScript() {
       return;
     }
     
-    // Determine if this needs TOP window navigation
-    var needsTopNavigation = false;
-    var finalUrl = href;
-    var originalExternalUrl = null; // For URL shortening
+    // Determine the actual target URL
+    var actualUrl = href;
+    var isProxied = isAlreadyProxied(href);
     
-    // CASE 1: Already a proxied URL (/p/xxx) - navigate TOP window to this URL
-    if (isAlreadyProxied(href)) {
-      needsTopNavigation = true;
-      finalUrl = href;
-      console.log('[Proxy:AdFrame] Intercepting proxied link click:', href.substring(0, 60));
-      
-      // Check if this proxied URL is too long (needs shortening)
-      if (href.length > MAX_PATH_LENGTH) {
-        // Extract the original URL from the proxy path for shortening
-        try {
-          var urlObj = new URL(href);
-          var encoded = urlObj.pathname.replace(/^\\/p\\//, '');
-          var base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
-          while (base64.length % 4) base64 += '=';
-          originalExternalUrl = decodeURIComponent(escape(atob(base64)));
-          console.log('[Proxy:AdFrame] Decoded long URL for shortening, length:', originalExternalUrl.length);
-        } catch(decodeErr) {
-          console.log('[Proxy:AdFrame] Could not decode URL for shortening');
-        }
+    // If it's a proxied URL, decode it to get the original
+    if (isProxied) {
+      var decoded = decodeProxiedUrl(href);
+      if (decoded) {
+        actualUrl = decoded;
       }
     }
-    // CASE 2: External URL - convert to proxy and navigate TOP window
-    else if (isExternalUrl(href)) {
-      needsTopNavigation = true;
-      originalExternalUrl = href;
-      finalUrl = toProxyUrl(href);
-      console.log('[Proxy:AdFrame] Intercepting external link click:', href.substring(0, 60));
-    }
     
-    // If we need to navigate the TOP window
-    if (needsTopNavigation) {
+    // Check if this is a Google Ads click URL
+    if (isGoogleAdsClickUrl(actualUrl)) {
+      console.log('[Proxy:AdFrame] Detected Google Ads click!');
+      
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
       
-      // Check if URL is too long and needs shortening
-      if (originalExternalUrl && originalExternalUrl.length > MAX_PATH_LENGTH) {
-        shortenAndNavigate(originalExternalUrl);
-      } else {
-        // CRITICAL: Always navigate the TOP window, not the iframe!
-        navigateTopWindow(finalUrl);
+      // Extract adurl as fallback
+      var fallbackAdurl = extractAdurl(actualUrl);
+      
+      // Use click beacon system
+      var handled = handleGoogleAdsClick(actualUrl, fallbackAdurl);
+      
+      if (!handled && fallbackAdurl) {
+        // Last resort: navigate to adurl through proxy
+        navigateTopWindow(toProxyUrl(fallbackAdurl));
       }
       
+      return false;
+    }
+    
+    // For non-Google URLs, use regular proxy navigation
+    var needsTopNavigation = false;
+    var finalUrl = href;
+    
+    if (isProxied) {
+      needsTopNavigation = true;
+      finalUrl = href;
+      console.log('[Proxy:AdFrame] Intercepting proxied link click:', href.substring(0, 60));
+    }
+    else if (isExternalUrl(href)) {
+      needsTopNavigation = true;
+      finalUrl = toProxyUrl(href);
+      console.log('[Proxy:AdFrame] Intercepting external link click:', href.substring(0, 60));
+    }
+    
+    if (needsTopNavigation) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      navigateTopWindow(finalUrl);
       return false;
     }
   }
